@@ -131,19 +131,17 @@ func addWaypoint(c *gin.Context, id string, token string) {
 }
 
 func addQuest(c *gin.Context, id string, token string) {
-
 	title := c.PostForm("title")
-	//content := req.FormValue("content")
 	quest := c.PostForm("q")
 	path := quest + "/" + title
-	fmt.Println(path)
+	fmt.Println("Creating quest:", path)
 	if safe {
 		bdb.Put([]byte("quests"), []byte(path), []byte(""))
 		bdb.Put([]byte("directories"), []byte(path), []byte("directory"))
 	} else {
 		os.Mkdir(path, 0700)
 	}
-	summary(c, token, id)
+	summary(c, id, token)
 }
 
 // ReadDir reads the directory named by dirname and returns
@@ -250,7 +248,7 @@ func loadNodes(path string, detailed bool) string {
 	return out
 }
 func nodeDisplay(path string, detailed bool) string {
-	return loadNodes(path, detailed) + `<form action="addQuest"><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" value="Add Quest"></form>` + `<form action="addWaypoint"><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" value="Add"></form>`
+	return loadNodes(path, detailed) + `<form action="addQuest"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" formmethod="post" value="Add Quest"></form>` + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
 }
 
 func toggle(c *gin.Context, id string, token string) {
@@ -288,7 +286,6 @@ func main() {
 
 func serveQuester(router *gin.Engine, prefix string) {
 
-	//Nocache is probably useless done this way, the server has already procesed the headers
 	router.GET(prefix+"summary", makeAuthed(summary))
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
