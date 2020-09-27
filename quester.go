@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -21,6 +22,33 @@ import (
 
 var safe bool = false
 var bdb *uniStore
+
+type Task struct {
+	Name      string
+	Text      string
+	TimeStamp time.Time
+	Checked   bool
+	SubTasks  []*Task
+}
+
+func LoadJson() *Task {
+	var out *Task
+	res, err := ioutil.ReadFile("quests.json")
+	err = json.Unmarshal(res, &out)
+	if err != nil {
+		log.Println("Could not load quests", err)
+		panic(err)
+	}
+	return out
+}
+
+func SaveJson(tasks *Task) {
+	payload, err := json.Marshal(tasks)
+	if err != nil {
+		panic("Could not marshallquests")
+	}
+	ioutil.WriteFile("quests.json", payload, 0600)
+}
 
 func sessionTokenToId(sessionToken string) string {
 	id := "-1"
@@ -60,7 +88,7 @@ window.addEventListener( "pageshow", function ( event ) {
 </script>
 </head>
 <body>
-   ` + nodeDisplay("nodes", false) + `
+   ` + taskDisplay("nodes", false) + `
  
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
@@ -114,7 +142,7 @@ window.addEventListener( "pageshow", function ( event ) {
 </script>
 </head>
 <body>
-   ` + nodeDisplay(q, true) + `
+   ` + taskDisplay(q, true) + `
 </body>
 </html>
 `))
@@ -126,6 +154,10 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	quest := c.PostForm("q")
 	path := quest + "/" + title
 	fmt.Println("Adding waypoint", path)
+	newTask := Task{Name: title, Text: content}
+	t := LoadJson()
+	t.SubTasks = append(t.SubTasks, &newTask)
+	SaveJson(t)
 	if safe {
 		bdb.Put([]byte("quests"), []byte(path), []byte(content))
 	} else {
@@ -188,6 +220,32 @@ func ReadDir(dirname string) ([][]byte, error) {
 	return out, nil
 }
 
+func FindTask(path string, task *Task) *Task {
+
+	paths := strings.Split(path, "/")
+	if paths[0] == "" {
+		return task
+	}
+	if paths[0] == "nodes" {
+		return FindTask(strings.Join(paths[1:], "/"), task)
+	}
+	for _, t := range task.SubTasks {
+		log.Println("Comparing", t.Name, "to '", paths[0], "'")
+		if t.Name == paths[0] {
+			return FindTask(strings.Join(paths[1:], "/"), t)
+		}
+
+	}
+	return nil
+}
+func isTaskChecked(task *Task) string {
+	var out string
+	if task.Checked {
+		out = `checked="checked"`
+	}
+	return out
+}
+
 func isPathChecked(path string) string {
 	var out string
 	metapath := "metadata/" + path + ".checked"
@@ -219,6 +277,35 @@ func myIsDir(path string) bool {
 		return goof.IsDir(path)
 	}
 	return false
+}
+
+func loadTasks(path string, task *Task, detailed bool) string {
+	out := ""
+	//if task == nil Do string to task
+	if task == nil {
+		task = FindTask(path, LoadJson())
+	}
+	if len(task.SubTasks) > 0 {
+		fmt.Println(path, "is a container task")
+		out = out + fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
+		tasks := task.SubTasks
+
+		for _, f := range tasks {
+			log.Println("Loading task", f.Name)
+			out = out + loadTasks(path+"/"+f.Name, f, detailed)
+		}
+		out = out + "</ul></li>"
+	} else {
+		fmt.Println(path, "is leaf task")
+		var contents = task.Text
+
+		if detailed {
+			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + "<p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
+		} else {
+			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + "</li>"
+		}
+	}
+	return out
 }
 
 func loadNodes(path string, detailed bool) string {
@@ -255,10 +342,19 @@ func nodeDisplay(path string, detailed bool) string {
 	return loadNodes(path, detailed) + `<form action="addQuest"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" formmethod="post" value="Add Quest"></form>` + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
 }
 
+func taskDisplay(path string, detailed bool) string {
+	return loadTasks(path, nil, detailed) + `<form action="addQuest"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" formmethod="post" value="Add Quest"></form>` + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
+}
+
 func toggle(c *gin.Context, id string, token string) {
 	upath := c.Query("path")
 	path := `metadata/` + string(upath) + `.checked`
 	fmt.Println("Toggling", path)
+
+	topNode := LoadJson()
+	t := FindTask(upath, topNode)
+	t.Checked = !t.Checked
+	SaveJson(topNode)
 	if safe {
 		if bdb.Exists([]byte("quests"), []byte(path)) {
 			bdb.Delete([]byte("quests"), []byte(path))
@@ -277,6 +373,8 @@ func toggle(c *gin.Context, id string, token string) {
 }
 
 func main() {
+	t := LoadJson()
+	SaveJson(t)
 	if safe {
 		bdb, _ = newUniStore("quests.db")
 		bdb.Put([]byte("quests"), []byte("1"), []byte("1"))
