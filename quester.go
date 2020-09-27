@@ -97,6 +97,10 @@ func detailed(c *gin.Context, id string, token string) {
   <meta charset="utf-8">
   <title>jsTree test</title>
   <!-- 2 load the theme CSS file --><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/themes/default/style.min.css" />
+  <!-- 4 include the jQuery library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
+  <!-- 5 include the minified jstree source -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/jstree.min.js"></script>
 <script>
 window.addEventListener( "pageshow", function ( event ) {
   var historyTraversal = event.persisted || 
@@ -252,9 +256,9 @@ func nodeDisplay(path string, detailed bool) string {
 }
 
 func toggle(c *gin.Context, id string, token string) {
-	paths := c.Query("path")
-	path := `metadata/` + string(paths[0]) + `.checked`
-	fmt.Println(path)
+	upath := c.Query("path")
+	path := `metadata/` + string(upath) + `.checked`
+	fmt.Println("Toggling", path)
 	if safe {
 		if bdb.Exists([]byte("quests"), []byte(path)) {
 			bdb.Delete([]byte("quests"), []byte(path))
@@ -263,8 +267,10 @@ func toggle(c *gin.Context, id string, token string) {
 		}
 	} else {
 		if goof.Exists(path) {
+			fmt.Println("Removing ", path)
 			os.Remove(path)
 		} else {
+			fmt.Println("Creating ", path)
 			os.MkdirAll(path, 0700)
 		}
 	}
@@ -290,7 +296,7 @@ func serveQuester(router *gin.Engine, prefix string) {
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
 	router.POST(prefix+"addQuest", makeAuthed(addQuest))
-	router.POST(prefix+"toggle", makeAuthed(toggle))
+	router.GET(prefix+"toggle", makeAuthed(toggle))
 }
 
 //Force nocache
