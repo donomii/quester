@@ -37,7 +37,11 @@ func LoadJson() *Task {
 	err = json.Unmarshal(res, &out)
 	if err != nil {
 		log.Println("Could not load quests", err)
-		panic(err)
+		//panic(err)
+	}
+	if out == nil {
+		t := Task{Name: "Quester", Text: "Quest style task tracking"}
+		out = &t
 	}
 	return out
 }
@@ -153,11 +157,16 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	content := c.PostForm("content")
 	quest := c.PostForm("q")
 	path := quest + "/" + title
-	fmt.Println("Adding waypoint", path)
-	newTask := Task{Name: title, Text: content}
-	t := LoadJson()
-	t.SubTasks = append(t.SubTasks, &newTask)
-	SaveJson(t)
+	log.Println("Adding waypoint", path)
+
+	topNode := LoadJson()
+	t := FindTask(quest, topNode)
+	existing := FindTask(path, topNode)
+	if existing == nil {
+		newTask := Task{Name: title, Text: content}
+		t.SubTasks = append(t.SubTasks, &newTask)
+		SaveJson(topNode)
+	}
 	if safe {
 		bdb.Put([]byte("quests"), []byte(path), []byte(content))
 	} else {
@@ -281,9 +290,13 @@ func myIsDir(path string) bool {
 
 func loadTasks(path string, task *Task, detailed bool) string {
 	out := ""
+	log.Println("Loading tasks for", path)
 	//if task == nil Do string to task
 	if task == nil {
 		task = FindTask(path, LoadJson())
+	}
+	if task == nil {
+		return ""
 	}
 	if len(task.SubTasks) > 0 {
 		fmt.Println(path, "is a container task")
@@ -300,9 +313,9 @@ func loadTasks(path string, task *Task, detailed bool) string {
 		var contents = task.Text
 
 		if detailed {
-			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + "<p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
+			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a><p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
 		} else {
-			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + "</li>"
+			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a></li>"
 		}
 	}
 	return out
