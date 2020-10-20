@@ -1,27 +1,21 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	//"github.com/gin-gonic/autotls"
 
-	"github.com/boltdb/bolt"
-	"github.com/donomii/goof"
 	"github.com/gin-gonic/gin"
 )
 
 var safe bool = false
-var bdb *uniStore
 
 type Task struct {
 	Name      string
@@ -31,9 +25,9 @@ type Task struct {
 	SubTasks  []*Task
 }
 
-func LoadJson() *Task {
+func LoadJson(id string) *Task {
 	var out *Task
-	res, err := ioutil.ReadFile("quests.json")
+	res, err := ioutil.ReadFile(fmt.Sprintf("quester/%v.json", id))
 	err = json.Unmarshal(res, &out)
 	if err != nil {
 		log.Println("Could not load quests", err)
@@ -46,26 +40,23 @@ func LoadJson() *Task {
 	return out
 }
 
-func SaveJson(tasks *Task) {
+func SaveJson(id string, tasks *Task) {
 	payload, err := json.Marshal(tasks)
 	if err != nil {
-		panic("Could not marshallquests")
+		panic("Could not marshall quests")
 	}
-	ioutil.WriteFile("quests.json", payload, 0600)
-}
-
-func sessionTokenToId(sessionToken string) string {
-	id := "-1"
-	return string(id)
+	ioutil.WriteFile(fmt.Sprintf("quester/%v.json", id), payload, 0600)
 }
 
 func makeAuthed(handlerFunc func(*gin.Context, string, string)) func(c *gin.Context) {
 	return func(c *gin.Context) {
-		sessionToken := c.Query("id")
-		log.Printf("Got token: '%v'", sessionToken)
-		//id := sessionTokenToId(sessionToken)
-		//log.Printf("Got real user id: '%v'", id)
-		handlerFunc(c, "-1", sessionToken)
+		id := c.Request.Header.Get("authentigate-id")
+		baseUrl := c.Request.Header.Get("authentigate-base-url")
+		if id == "" {
+			id = "personalusermode"
+		}
+		log.Printf("Got real user id: '%v'", id)
+		handlerFunc(c, id, baseUrl)
 	}
 
 }
@@ -92,7 +83,7 @@ window.addEventListener( "pageshow", function ( event ) {
 </script>
 </head>
 <body>
-   ` + taskDisplay("nodes", false) + `
+   ` + taskDisplay(id, "nodes", false) + `
  
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
@@ -146,7 +137,7 @@ window.addEventListener( "pageshow", function ( event ) {
 </script>
 </head>
 <body>
-   ` + taskDisplay(q, true) + `
+   ` + taskDisplay(id, q, true) + `
 </body>
 </html>
 `))
@@ -157,76 +148,20 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	content := c.PostForm("content")
 	quest := c.PostForm("q")
 	path := quest + "/" + title
-	log.Println("Adding waypoint", path)
 
-	topNode := LoadJson()
+	topNode := LoadJson(id)
 	t := FindTask(quest, topNode)
 	existing := FindTask(path, topNode)
 	if existing == nil {
+		log.Println("Adding waypoint", path)
 		newTask := Task{Name: title, Text: content}
 		t.SubTasks = append(t.SubTasks, &newTask)
-		SaveJson(topNode)
-	}
-	if safe {
-		bdb.Put([]byte("quests"), []byte(path), []byte(content))
+		SaveJson(id, topNode)
 	} else {
-		ioutil.WriteFile(path, []byte(content), 0644)
+		log.Println("Waypoint exists, not adding", path)
 	}
+
 	summary(c, id, token)
-}
-
-func addQuest(c *gin.Context, id string, token string) {
-	title := c.PostForm("title")
-	quest := c.PostForm("q")
-	path := quest + "/" + title
-	fmt.Println("Creating quest:", path)
-	if safe {
-		bdb.Put([]byte("quests"), []byte(path), []byte(""))
-		bdb.Put([]byte("directories"), []byte(path), []byte("directory"))
-	} else {
-		os.Mkdir(path, 0700)
-	}
-	summary(c, id, token)
-}
-
-// ReadDir reads the directory named by dirname and returns
-
-// a list of directory entries sorted by filename.
-
-func ReadDir(dirname string) ([][]byte, error) {
-	var out [][]byte
-	if safe {
-		files := bdb.List([]byte("quests"))
-		for _, v := range files {
-			if bytes.HasPrefix(v, []byte(dirname)) {
-				out = append(out, bytes.Replace(v, []byte(dirname+"/"), []byte(""), 1))
-			}
-		}
-	} else {
-
-		f, err := os.Open(dirname)
-
-		if err != nil {
-
-			return out, err
-
-		}
-
-		list, err := f.Readdir(-1)
-
-		f.Close()
-
-		if err != nil {
-
-			return out, err
-
-		}
-
-		for _, v := range list {
-			out = append(out, []byte(v.Name()))
-		}
-	}
-	return out, nil
 }
 
 func FindTask(path string, task *Task) *Task {
@@ -255,22 +190,6 @@ func isTaskChecked(task *Task) string {
 	return out
 }
 
-func isPathChecked(path string) string {
-	var out string
-	metapath := "metadata/" + path + ".checked"
-	fmt.Println("Checking", metapath)
-	if safe {
-		if bdb.Exists([]byte("quests"), []byte(metapath)) {
-			out = `checked="checked"`
-		}
-	} else {
-		if goof.Exists(metapath) {
-			out = `checked="checked"`
-		}
-	}
-	return out
-}
-
 func forceTrailingSlash(path string) string {
 	if strings.HasSuffix(path, "/") {
 		return path
@@ -279,21 +198,12 @@ func forceTrailingSlash(path string) string {
 	}
 }
 
-func myIsDir(path string) bool {
-	if safe {
-		return bdb.Exists([]byte("directories"), []byte(path))
-	} else {
-		return goof.IsDir(path)
-	}
-	return false
-}
-
-func loadTasks(path string, task *Task, detailed bool) string {
+func loadTasks(id, path string, task *Task, detailed bool) string {
 	out := ""
 	log.Println("Loading tasks for", path)
 	//if task == nil Do string to task
 	if task == nil {
-		task = FindTask(path, LoadJson())
+		task = FindTask(path, LoadJson(id))
 	}
 	if task == nil {
 		return ""
@@ -305,7 +215,7 @@ func loadTasks(path string, task *Task, detailed bool) string {
 
 		for _, f := range tasks {
 			log.Println("Loading task", f.Name)
-			out = out + loadTasks(path+"/"+f.Name, f, detailed)
+			out = out + loadTasks(id, path+"/"+f.Name, f, detailed)
 		}
 		out = out + "</ul></li>"
 	} else {
@@ -321,42 +231,8 @@ func loadTasks(path string, task *Task, detailed bool) string {
 	return out
 }
 
-func loadNodes(path string, detailed bool) string {
-	out := ""
-	if myIsDir(path) {
-		fmt.Println(path, "is directory")
-		out = out + fmt.Sprintf("<li><input type=\"checkbox\" "+isPathChecked(path)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + filepath.Base(path) + "</a><ul>"
-		files, err := ReadDir(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, f := range files {
-			out = out + loadNodes(path+"/"+string(f), detailed)
-		}
-		out = out + "</ul></li>"
-	} else {
-		fmt.Println(path, "is file")
-		var contents []byte
-		if safe {
-			contents, _ = bdb.Get([]byte("quests"), []byte(path))
-		} else {
-			contents, _ = ioutil.ReadFile(path)
-		}
-		if detailed {
-			out = out + "<li><input type=\"checkbox\"  " + isPathChecked(path) + " onclick=\"$.get('toggle?path=" + path + "')\">" + filepath.Base(path) + "<p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
-		} else {
-			out = out + "<li><input type=\"checkbox\"  " + isPathChecked(path) + " onclick=\"$.get('toggle?path=" + path + "')\">" + filepath.Base(path) + "</li>"
-		}
-	}
-	return out
-}
-func nodeDisplay(path string, detailed bool) string {
-	return loadNodes(path, detailed) + `<form action="addQuest"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" formmethod="post" value="Add Quest"></form>` + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
-}
-
-func taskDisplay(path string, detailed bool) string {
-	return loadTasks(path, nil, detailed) + `<form action="addQuest"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input type="submit" formmethod="post" value="Add Quest"></form>` + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
+func taskDisplay(id, path string, detailed bool) string {
+	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
 }
 
 func toggle(c *gin.Context, id string, token string) {
@@ -364,41 +240,18 @@ func toggle(c *gin.Context, id string, token string) {
 	path := `metadata/` + string(upath) + `.checked`
 	fmt.Println("Toggling", path)
 
-	topNode := LoadJson()
+	topNode := LoadJson(id)
 	t := FindTask(upath, topNode)
 	t.Checked = !t.Checked
-	SaveJson(topNode)
-	if safe {
-		if bdb.Exists([]byte("quests"), []byte(path)) {
-			bdb.Delete([]byte("quests"), []byte(path))
-		} else {
-			bdb.Put([]byte("quests"), []byte(path), []byte(""))
-		}
-	} else {
-		if goof.Exists(path) {
-			fmt.Println("Removing ", path)
-			os.Remove(path)
-		} else {
-			fmt.Println("Creating ", path)
-			os.MkdirAll(path, 0700)
-		}
-	}
+	SaveJson(id, topNode)
+
 }
 
 func main() {
-	t := LoadJson()
-	SaveJson(t)
-	if safe {
-		bdb, _ = newUniStore("quests.db")
-		bdb.Put([]byte("quests"), []byte("1"), []byte("1"))
-		bdb.Put([]byte("directories"), []byte("nodes"), []byte("directory"))
-	} else {
-		os.Mkdir("nodes", 0700)
-	}
+	os.Mkdir("quester", 0700)
 	router := gin.Default()
 	serveQuester(router, "/quester/")
-	//log.Fatal(autotls.Run(router, "localhost", "localhost"))
-	router.Run()
+	router.Run("127.0.0.1:93")
 }
 
 func serveQuester(router *gin.Engine, prefix string) {
@@ -406,7 +259,7 @@ func serveQuester(router *gin.Engine, prefix string) {
 	router.GET(prefix+"summary", makeAuthed(summary))
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
-	router.POST(prefix+"addQuest", makeAuthed(addQuest))
+
 	router.GET(prefix+"toggle", makeAuthed(toggle))
 }
 
@@ -447,96 +300,4 @@ func NoCache(f func(w http.ResponseWriter, r *http.Request)) func(w http.Respons
 	}
 
 	return fn
-}
-
-type uniStore struct {
-	db *bolt.DB
-}
-
-func newUniStore(filename string) (s *uniStore, err error) {
-	s = &uniStore{}
-	s.db, err = bolt.Open(filename, 0600, &bolt.Options{Timeout: 1 * time.Second})
-	return
-}
-
-func (s *uniStore) Exists(bucket, key []byte) bool {
-
-	var v []byte
-	v = nil
-	s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		if b == nil {
-			return nil
-		}
-		v = b.Get([]byte(key))
-		return nil
-	})
-	if v == nil {
-		return false
-	} else {
-		return true
-	}
-	return false
-}
-func (s *uniStore) Put(bucket, key []byte, val []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte(bucket))
-		if err != nil {
-			panic(err)
-		}
-		b = tx.Bucket([]byte(bucket))
-		if err = b.Put([]byte(key), val); err != nil {
-			log.Printf("%v", err)
-			panic(err)
-		}
-		//log.Printf("Wrote %v:%v to %v", key, string(val), bucket)
-		return nil
-	})
-}
-
-func (s *uniStore) Delete(bucket, key []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte(bucket))
-		if err != nil {
-			panic(err)
-		}
-		b = tx.Bucket([]byte(bucket))
-		if err = b.Delete([]byte(key)); err != nil {
-			log.Printf("%v", err)
-			panic(err)
-		}
-		//log.Printf("Wrote %v:%v to %v", key, string(val), bucket)
-		return nil
-	})
-}
-
-func (s *uniStore) Get(bucket, key []byte) (data []byte, err error) {
-	err = errors.New("Id '" + string(key) + "' not found!")
-	s.db.View(func(tx *bolt.Tx) error {
-		bb := tx.Bucket([]byte(bucket))
-		r := bb.Get([]byte(key))
-		if r != nil && len(r) > 10 {
-			data = make([]byte, len(r))
-			copy(data, r)
-			err = nil
-		}
-		return nil
-	})
-	return
-}
-
-func (s *uniStore) List(bucket []byte) [][]byte {
-	var out [][]byte
-	s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		// Iterate over items in sorted key order.
-		if err := b.ForEach(func(k, v []byte) error {
-			out = append(out, k)
-			return nil
-		}); err != nil {
-			return err
-		}
-		return nil
-	})
-	return out
 }
