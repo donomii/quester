@@ -237,8 +237,7 @@ func taskDisplay(id, path string, detailed bool) string {
 
 func toggle(c *gin.Context, id string, token string) {
 	upath := c.Query("path")
-	path := `metadata/` + string(upath) + `.checked`
-	fmt.Println("Toggling", path)
+	fmt.Println("Toggling", upath)
 
 	topNode := LoadJson(id)
 	t := FindTask(upath, topNode)
