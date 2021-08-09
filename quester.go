@@ -25,10 +25,18 @@ type Task struct {
 	SubTasks  []*Task
 }
 
+
+func LoadRawJson(id string) []byte {
+	res, _ := ioutil.ReadFile(fmt.Sprintf("quester/%v.json", id))
+	return res
+}
+
+
+
 func LoadJson(id string) *Task {
 	var out *Task
-	res, err := ioutil.ReadFile(fmt.Sprintf("quester/%v.json", id))
-	err = json.Unmarshal(res, &out)
+	res := LoadRawJson(id)
+	err := json.Unmarshal(res, &out)
 	if err != nil {
 		log.Println("Could not load quests", err)
 		//panic(err)
@@ -40,12 +48,17 @@ func LoadJson(id string) *Task {
 	return out
 }
 
+func SaveRawJson(id string, data []byte) {
+	//FIXME create directory, possibly at startup
+	ioutil.WriteFile(fmt.Sprintf("quester/%v.json", id), data, 0600)
+}
+
 func SaveJson(id string, tasks *Task) {
 	payload, err := json.Marshal(tasks)
 	if err != nil {
 		panic("Could not marshall quests")
 	}
-	ioutil.WriteFile(fmt.Sprintf("quester/%v.json", id), payload, 0600)
+	SaveRawJson(id, payload)
 }
 
 func makeAuthed(handlerFunc func(*gin.Context, string, string)) func(c *gin.Context) {
@@ -59,6 +72,10 @@ func makeAuthed(handlerFunc func(*gin.Context, string, string)) func(c *gin.Cont
 		handlerFunc(c, id, baseUrl)
 	}
 
+}
+
+func downloadAll(c *gin.Context, id string, token string) {
+	c.Writer.Write(LoadRawJson(id));
 }
 
 func summary(c *gin.Context, id string, token string) {
@@ -143,6 +160,11 @@ window.addEventListener( "pageshow", function ( event ) {
 `))
 }
 
+func restoreAll(c *gin.Context, id string, token string) {
+	content := c.PostForm("content")
+	SaveRawJson(id, []byte(content))
+}
+
 func addWaypoint(c *gin.Context, id string, token string) {
 	title := c.PostForm("title")
 	content := c.PostForm("content")
@@ -154,7 +176,7 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	existing := FindTask(path, topNode)
 	if existing == nil {
 		log.Println("Adding waypoint", path)
-		newTask := Task{Name: title, Text: content}
+		newTask := Task{Name: title, Text: content, TimeStamp: time.Now()}
 		t.SubTasks = append(t.SubTasks, &newTask)
 		SaveJson(id, topNode)
 	} else {
@@ -256,6 +278,8 @@ func main() {
 func serveQuester(router *gin.Engine, prefix string) {
 
 	router.GET(prefix+"summary", makeAuthed(summary))
+	router.GET(prefix+"downloadAll", makeAuthed(downloadAll))
+	router.GET(prefix+"restoreAll", makeAuthed(restoreAll))
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
 
