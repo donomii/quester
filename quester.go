@@ -75,7 +75,11 @@ func makeAuthed(handlerFunc func(*gin.Context, string, string)) func(c *gin.Cont
 }
 
 func downloadAll(c *gin.Context, id string, token string) {
-	c.Writer.Write(LoadRawJson(id));
+	c.Header("Content-Type","application/json")
+	c.Header("Content-Disposition","attachment; filename=\"tasks.json\"")
+	tasks := LoadJson(id)
+	j, _ := json.MarshalIndent(tasks, "", "\t")
+	c.Writer.Write(j);
 }
 
 func summary(c *gin.Context, id string, token string) {
@@ -100,6 +104,8 @@ window.addEventListener( "pageshow", function ( event ) {
 </script>
 </head>
 <body>
+<a href="downloadAll">Download all tasks</a>
+<a href="restoreAllPage">Restore from backup</a>
    ` + taskDisplay(id, "nodes", false) + `
  
   <!-- 4 include the jQuery library -->
@@ -161,8 +167,13 @@ window.addEventListener( "pageshow", function ( event ) {
 }
 
 func restoreAll(c *gin.Context, id string, token string) {
-	content := c.PostForm("content")
-	SaveRawJson(id, []byte(content))
+	content, err := c.FormFile("content")
+	if err != nil {
+		panic(err)
+	}
+	openedFile, _ := content.Open()
+	file, _ := ioutil.ReadAll(openedFile)
+	SaveRawJson(id, []byte(file))
 }
 
 func addWaypoint(c *gin.Context, id string, token string) {
@@ -196,7 +207,7 @@ func FindTask(path string, task *Task) *Task {
 		return FindTask(strings.Join(paths[1:], "/"), task)
 	}
 	for _, t := range task.SubTasks {
-		log.Println("Comparing", t.Name, "to '", paths[0], "'")
+		//log.Println("Comparing", t.Name, "to '", paths[0], "'")
 		if t.Name == paths[0] {
 			return FindTask(strings.Join(paths[1:], "/"), t)
 		}
@@ -222,7 +233,7 @@ func forceTrailingSlash(path string) string {
 
 func loadTasks(id, path string, task *Task, detailed bool) string {
 	out := ""
-	log.Println("Loading tasks for", path)
+	//log.Println("Loading tasks for", path)
 	//if task == nil Do string to task
 	if task == nil {
 		task = FindTask(path, LoadJson(id))
@@ -231,17 +242,17 @@ func loadTasks(id, path string, task *Task, detailed bool) string {
 		return ""
 	}
 	if len(task.SubTasks) > 0 {
-		fmt.Println(path, "is a container task")
+		//fmt.Println(path, "is a container task")
 		out = out + fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
 		tasks := task.SubTasks
 
 		for _, f := range tasks {
-			log.Println("Loading task", f.Name)
+			//log.Println("Loading task", f.Name)
 			out = out + loadTasks(id, path+"/"+f.Name, f, detailed)
 		}
 		out = out + "</ul></li>"
 	} else {
-		fmt.Println(path, "is leaf task")
+		//fmt.Println(path, "is leaf task")
 		var contents = task.Text
 
 		if detailed {
@@ -253,13 +264,23 @@ func loadTasks(id, path string, task *Task, detailed bool) string {
 	return out
 }
 
+func restoreAllDisplay(c *gin.Context, id string, token string) {
+	c.Writer.Write([]byte(`<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+	Select a backup file to restore from.  Your current tasks will be wiped, and replaced with this file.<P><P><form action="restoreAll" method="post" enctype="multipart/form-data"><input type="file" id="content" name="content"><input type="submit" formmethod="post" value="Restore"></form>
+	</body>
+	</html>`))
+}
+
 func taskDisplay(id, path string, detailed bool) string {
-	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
+	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
 }
 
 func toggle(c *gin.Context, id string, token string) {
 	upath := c.Query("path")
-	fmt.Println("Toggling", upath)
+	log.Println("user", id, "toggling", upath)
 
 	topNode := LoadJson(id)
 	t := FindTask(upath, topNode)
@@ -279,7 +300,8 @@ func serveQuester(router *gin.Engine, prefix string) {
 
 	router.GET(prefix+"summary", makeAuthed(summary))
 	router.GET(prefix+"downloadAll", makeAuthed(downloadAll))
-	router.GET(prefix+"restoreAll", makeAuthed(restoreAll))
+	router.POST(prefix+"restoreAll", makeAuthed(restoreAll))
+	router.GET(prefix+"restoreAllPage", makeAuthed(restoreAllDisplay))
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
 
