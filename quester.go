@@ -22,16 +22,14 @@ type Task struct {
 	Text      string
 	TimeStamp time.Time
 	Checked   bool
+	Deleted   bool
 	SubTasks  []*Task
 }
-
 
 func LoadRawJson(id string) []byte {
 	res, _ := ioutil.ReadFile(fmt.Sprintf("quester/%v.json", id))
 	return res
 }
-
-
 
 func LoadJson(id string) *Task {
 	var out *Task
@@ -197,6 +195,43 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	summary(c, id, token)
 }
 
+func deleteWaypoint(c *gin.Context, id string, token string) {
+	quest := c.PostForm("q")
+
+	topNode := LoadJson(id)
+	t := FindTask(quest, topNode)
+
+	if t == nil {
+		log.Println("Task does not exist, cannot be deleted:", quest)
+	} else {
+		log.Println("Deleting waypoint", quest)
+		t.Deleted = true
+		SaveJson(id, topNode)
+	}
+
+	summary(c, id, token)
+}
+
+func editWaypoint(c *gin.Context, id string, token string) {
+	quest := c.PostForm("q")
+	title := c.PostForm("title")
+	content := c.PostForm("content")
+
+	topNode := LoadJson(id)
+	t := FindTask(quest, topNode)
+
+	if t == nil {
+		log.Println("Task does not exist, cannot be updated:", quest)
+	} else {
+		log.Println("updating waypoint", quest)
+		t.Text = content
+		t.Name = title
+		SaveJson(id, topNode)
+	}
+
+	summary(c, id, token)
+}
+
 func FindTask(path string, task *Task) *Task {
 
 	paths := strings.Split(path, "/")
@@ -241,24 +276,26 @@ func loadTasks(id, path string, task *Task, detailed bool) string {
 	if task == nil {
 		return ""
 	}
-	if len(task.SubTasks) > 0 {
-		//fmt.Println(path, "is a container task")
-		out = out + fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
-		tasks := task.SubTasks
+	if !task.Deleted {
+		if len(task.SubTasks) > 0 {
+			fmt.Println(path, "is a container task")
+			out = out + fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
+			tasks := task.SubTasks
 
-		for _, f := range tasks {
-			//log.Println("Loading task", f.Name)
-			out = out + loadTasks(id, path+"/"+f.Name, f, detailed)
-		}
-		out = out + "</ul></li>"
-	} else {
-		//fmt.Println(path, "is leaf task")
-		var contents = task.Text
-
-		if detailed {
-			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a><p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
+			for _, f := range tasks {
+				//log.Println("Loading task", f.Name)
+				out = out + loadTasks(id, path+"/"+f.Name, f, detailed)
+			}
+			out = out + "</ul></li>"
 		} else {
-			out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a></li>"
+			//fmt.Println(path, "is leaf task")
+			var contents = task.Text
+
+			if detailed {
+				out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a><p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
+			} else {
+				out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a></li>"
+			}
 		}
 	}
 	return out
@@ -275,7 +312,9 @@ func restoreAllDisplay(c *gin.Context, id string, token string) {
 }
 
 func taskDisplay(id, path string, detailed bool) string {
-	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>`
+	task := FindTask(path, LoadJson(id))
+	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>` + `<form action="deleteWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input type="submit" formmethod="post" value="Delete"></form>` + `<form action="editWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text" value="` + task.Name + `"><input id="content" name="content" type="text" value="` + task.Text + `"><input type="submit" formmethod="post" value="Update"></form>`
+
 }
 
 func toggle(c *gin.Context, id string, token string) {
@@ -304,6 +343,9 @@ func serveQuester(router *gin.Engine, prefix string) {
 	router.GET(prefix+"restoreAllPage", makeAuthed(restoreAllDisplay))
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
+	router.POST(prefix+"deleteWaypoint", makeAuthed(deleteWaypoint))
+
+	router.POST(prefix+"editWaypoint", makeAuthed(editWaypoint))
 
 	router.GET(prefix+"toggle", makeAuthed(toggle))
 }
