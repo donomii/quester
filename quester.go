@@ -1913,11 +1913,13 @@ func summary(c *gin.Context, id string, token string) {
 </div>
 
 
+<div class="sr" id="links">
+
 
 
 
    ` + taskDisplay(id, str2md5("nodes"), false,1) + `
- 
+   </div>
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
 </style>
@@ -2051,7 +2053,6 @@ func forceTrailingSlash(path string) string {
 func buildItem(picurl, thumburl, path, description, extradescription string, checked bool) string {
 	template := `
 
-	<div class="sr" id="links">
 
 	<div class="link">
 		<div class="upvotes">
@@ -2060,9 +2061,10 @@ func buildItem(picurl, thumburl, path, description, extradescription string, che
 			<div class="arrow down"></div>
 		</div>
 		<div class="image">
-			<a href="/r/nextfuckinglevel/comments/x9qj8j/ooh_ooh_here_she_comes/"><img src="PICURL" alt=""><span class="duration">00:23</span></a>
+			<a href="/r/nextfuckinglevel/comments/x9qj8j/ooh_ooh_here_she_comes/"><img src="PICURL" alt="">
+				<span class="duration">00:23</span>
+			</a>
 		</div>
-
 		<div class="entry">
 			<div class="title">
 				<a href="detailed?q=PATH">
@@ -2071,20 +2073,21 @@ func buildItem(picurl, thumburl, path, description, extradescription string, che
 				<span>SHORTEXTRADESCRIPTION</span>
 			</div>
 			<div class="meta">
-			<p class="submitted">submitted
-				<span title="Fri, 09 Sep 2022 09:06:55 GMT">12 hours ago by</span>
-				<a href="/u/the-highlife-artia">the-highlife-artia</a>
-			</p>
-			<p class="to">
-				to
-				<a href="/r/nextfuckinglevel">nextfuckinglevel</a>
-			</p>
-			<div class="links">
-				<a class="comments" href="detailed?q=PATH">5933 comments</a><a href="">save</a>
+				<p class="submitted">submitted
+					<span title="Fri, 09 Sep 2022 09:06:55 GMT">12 hours ago by</span>
+					<a href="/u/the-highlife-artia">the-highlife-artia</a>
+				</p>
+				<p class="to">
+					to
+					<a href="/r/nextfuckinglevel">nextfuckinglevel</a>
+				</p>
+				<div class="links">
+					<a class="comments" href="detailed?q=PATH">5933 comments</a><a href="">save</a>
+				</div>
 			</div>
 		</div>
 	</div>
-</div>
+
 
 
 	
