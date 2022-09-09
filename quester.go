@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -18,6 +19,7 @@ import (
 var safe bool = false
 
 type Task struct {
+	Id string
 	Name      string
 	Text      string
 	TimeStamp time.Time
@@ -29,6 +31,16 @@ type Task struct {
 func LoadRawJson(id string) []byte {
 	res, _ := ioutil.ReadFile(fmt.Sprintf("quester/%v.json", id))
 	return res
+}
+
+	//Walk through the task tree, visiting every node, and setting the id
+	//to the md5 hash of the Name
+func SetIds(t *Task) {
+	t.Id = str2md5(t.Name+t.Text)
+	
+	for _, subTask := range t.SubTasks {
+		SetIds(subTask)
+	}
 }
 
 func LoadJson(id string) *Task {
@@ -43,6 +55,9 @@ func LoadJson(id string) *Task {
 		t := Task{Name: "Quester", Text: "Quest style task tracking"}
 		out = &t
 	}
+	SetIds(out)
+	SaveJson(id, out)
+	
 	return out
 }
 
@@ -87,46 +102,16 @@ func summary(c *gin.Context, id string, token string) {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>jsTree test</title>
-  <!-- 2 load the theme CSS file --><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/themes/default/style.min.css" />
-<script>
-window.addEventListener( "pageshow", function ( event ) {
-  var historyTraversal = event.persisted || 
-                         ( typeof window.performance != "undefined" && 
-                              window.performance.navigation.type === 2 );
-  if ( historyTraversal ) {
-    // Handle page restore.
-    window.location.reload();
-  }
-});
-</script>
+  <title>Unfinished Business</title>
 </head>
 <body>
 <a href="downloadAll">Download all tasks</a>
 <a href="restoreAllPage">Restore from backup</a>
-   ` + taskDisplay(id, "nodes", false) + `
+   ` + taskDisplay(id, str2md5("nodes"), false) + `
  
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
-  <!-- 5 include the minified jstree source -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/jstree.min.js"></script>
-  <script>
-  $(function () {
-    // 6 create an instance when the DOM is ready
-    $('#jstree').jstree();
-    // 7 bind to events triggered on the tree
-    $('#jstree').on("changed.jstree", function (e, data) {
-      console.log(data.selected);
-    });
-	
-    // 8 interact with the tree - either way is OK
-    $('button').on('click', function () {
-      $('#jstree').jstree(true).select_node('child_node_1');
-      $('#jstree').jstree('select_node', 'child_node_1');
-      $.jstree.reference('#jstree').select_node('child_node_1');
-    });
-  });
-  </script>
+
 </body>
 </html>
 `))
@@ -139,23 +124,10 @@ func detailed(c *gin.Context, id string, token string) {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>jsTree test</title>
-  <!-- 2 load the theme CSS file --><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/themes/default/style.min.css" />
+  <title>Unfinished Business</title>
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
-  <!-- 5 include the minified jstree source -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jstree/3.2.1/jstree.min.js"></script>
-<script>
-window.addEventListener( "pageshow", function ( event ) {
-  var historyTraversal = event.persisted || 
-                         ( typeof window.performance != "undefined" && 
-                              window.performance.navigation.type === 2 );
-  if ( historyTraversal ) {
-    // Handle page restore.
-    window.location.reload();
-  }
-});
-</script>
+  
 </head>
 <body>
    ` + taskDisplay(id, q, true) + `
@@ -178,19 +150,15 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	title := c.PostForm("title")
 	content := c.PostForm("content")
 	quest := c.PostForm("q")
-	path := quest + "/" + title
+	path := quest + "/" + fmt.Sprintf("%x", md5.Sum([]byte(title+content)))
 
 	topNode := LoadJson(id)
 	t := FindTask(quest, topNode)
-	existing := FindTask(path, topNode)
-	if existing == nil {
+	
 		log.Println("Adding waypoint", path)
-		newTask := Task{Name: title, Text: content, TimeStamp: time.Now()}
+		newTask := Task{Id: fmt.Sprintf("%x", md5.Sum([]byte(title+content))),Name: title, Text: content, TimeStamp: time.Now()}
 		t.SubTasks = append(t.SubTasks, &newTask)
 		SaveJson(id, topNode)
-	} else {
-		log.Println("Waypoint exists, not adding", path)
-	}
 
 	summary(c, id, token)
 }
@@ -232,18 +200,22 @@ func editWaypoint(c *gin.Context, id string, token string) {
 	summary(c, id, token)
 }
 
+func str2md5(str string) string {
+	return fmt.Sprintf("%x", md5.Sum([]byte(str)))
+}
+
 func FindTask(path string, task *Task) *Task {
 
 	paths := strings.Split(path, "/")
 	if paths[0] == "" {
 		return task
 	}
-	if paths[0] == "nodes" {
+	if paths[0] == str2md5("nodes") {
 		return FindTask(strings.Join(paths[1:], "/"), task)
 	}
 	for _, t := range task.SubTasks {
 		//log.Println("Comparing", t.Name, "to '", paths[0], "'")
-		if t.Name == paths[0] {
+		if t.Id == paths[0] {
 			return FindTask(strings.Join(paths[1:], "/"), t)
 		}
 
@@ -284,7 +256,7 @@ func loadTasks(id, path string, task *Task, detailed bool) string {
 
 			for _, f := range tasks {
 				//log.Println("Loading task", f.Name)
-				out = out + loadTasks(id, path+"/"+f.Name, f, detailed)
+				out = out + loadTasks(id, path+"/"+f.Id, f, detailed)
 			}
 			out = out + "</ul></li>"
 		} else {
@@ -313,7 +285,10 @@ func restoreAllDisplay(c *gin.Context, id string, token string) {
 
 func taskDisplay(id, path string, detailed bool) string {
 	task := FindTask(path, LoadJson(id))
-	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit" formmethod="post" value="Add"></form>` + `<form action="deleteWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input type="submit" formmethod="post" value="Delete"></form>` + `<form action="editWaypoint"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text" value="` + task.Name + `"><input id="content" name="content" type="text" value="` + task.Text + `"><input type="submit" formmethod="post" value="Update"></form>`
+	if task == nil {
+		panic("Task not found " + path)
+	}
+	return loadTasks(id, path, nil, detailed) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit"  value="Add"></form>` + `<form action="deleteWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input type="submit" value="Delete"></form>` + `<form action="editWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text" value="` + task.Name + `"><input id="content" name="content" type="text" value="` + task.Text + `"><input type="submit" value="Update"></form>`
 
 }
 
