@@ -358,9 +358,9 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 			  <p class="stickied"></p>
 			</div>
 			<div class="body"><div class="md"><p>` + task.Name  + string(contents) + `</p>
-		</div>`
+		`
 			out = out + buildItem("","", path, task.Name, task.Id, task.Checked)
-			out=out+`</details></div>`
+			
 			/*
 			fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
 			*/
@@ -371,6 +371,9 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 				//log.Println("Loading task", f.Name)
 				out = out + loadTasks(id, path+"/"+f.Id, f, detailed, depth-1, alternator+i+1)
 			}
+
+			out=out+`</details></div>`
+			
 		}
 			//out = out + "</ul></li>"
 		} else {
