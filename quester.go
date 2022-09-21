@@ -122,7 +122,7 @@ func summary(c *gin.Context, id string, token string) {
   <style>`+ styleCss + `</style>
   </head>
 
-<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="/"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="/"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="/new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
+<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="summary"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="summary"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="/new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
 
 </li><li><a href="restoreAllPage">Restore</a></li></ul></div></header><div id="intro">
 <h1>Welcome to Unfinished Business</h1>
@@ -155,8 +155,10 @@ func summaryView(id, path string, t *Task) string{
 		return ""
 	}
 	for _, task := range t.SubTasks {
+		if !task.Deleted {
 		subPath := path + "/" + task.Id
 		out = out + buildItem("","", subPath, task.Name, task.Id, task.Checked)
+		}
 	}
 
 	out=out + `<form action="addWaypoint" method="post" >
@@ -179,20 +181,36 @@ func summaryView(id, path string, t *Task) string{
 func detailed(c *gin.Context, id string, token string) {
 	q := c.Query("q")
 	c.Writer.Write([]byte(`
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Unfinished Business</title>
-  <!-- 4 include the jQuery library -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
-  <style>`+ styleCss + `</style>
-</head>
-<body>
-   ` + detailedTaskDisplay(id, q,  -1) + `
-</body>
-</html>
-`))
+	<!DOCTYPE html>
+	<html>
+	<head>
+	  <meta charset="utf-8">
+	  <title>Unfinished Business</title>
+	  <style>`+ styleCss + `</style>
+	  </head>
+	
+	<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="summary"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="summary"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="/new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
+	
+	</li><li><a href="restoreAllPage">Restore</a></li></ul></div></header><div id="intro">
+	<h1>Welcome to Unfinished Business</h1>
+	<h2>the online hierarchical task manager.</h2>
+	</div>
+	
+	
+	<div class="sr" id="links">
+	
+	
+	
+	
+	   ` +  detailedTaskDisplay(id, q,  -1)+ `
+	   </div>
+	  <!-- 4 include the jQuery library -->
+	  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
+	</style>
+	</div>
+	</body>
+	</html>
+	`))
 }
 
 func restoreAll(c *gin.Context, id string, token string) {
