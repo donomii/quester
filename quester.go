@@ -412,7 +412,10 @@ func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 		} else {
 			//fmt.Println(path, "is leaf task")
 			var contents = task.Text
-
+			checkedStatus := ""
+			if task.Checked {
+				checkedStatus =`checked="checked"`
+				}
 			
 				out=out+` 
 			<div class="comment `+oddEven(alternator)+`-depth" id="io7v1nv">
@@ -432,7 +435,8 @@ func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 				  </p>
 				  <p class="stickied"></p>
 				</div>
-				<div class="body"><div class="md"><p>` + task.Name  + string(contents) + `</p>
+				<div class="body"><div class="md"><p>
+				<input type="checkbox" `+ checkedStatus+ ` onclick="$.get('toggle?path=`+path+`')">` + task.Name  + string(contents) + `</p>
   			</details></div>
 			
 				  `
