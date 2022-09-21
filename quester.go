@@ -62,8 +62,8 @@ func LoadJson(id string) *Task {
 		t := Task{Name: "Quester", Text: "Quest style task tracking"}
 		out = &t
 	}
-	SetIds(out)
-	SaveJson(id, out)
+	//SetIds(out)
+	//SaveJson(id, out)
 	
 	return out
 }
@@ -135,7 +135,7 @@ func summary(c *gin.Context, id string, token string) {
 
 
 
-   ` + taskDisplay(id, str2md5("nodes"), false,1) + `
+   ` + summaryView(id, str2md5("nodes"), nil) + `
    </div>
   <!-- 4 include the jQuery library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
@@ -144,6 +144,36 @@ func summary(c *gin.Context, id string, token string) {
 </body>
 </html>
 `))
+}
+
+func summaryView(id, path string, t *Task) string{
+	if t == nil {
+		t = FindTask(path, LoadJson(id))
+	}
+	out := ""
+	if t == nil {
+		return ""
+	}
+	for _, task := range t.SubTasks {
+		subPath := path + "/" + task.Id
+		out = out + buildItem("","", subPath, task.Name, task.Id, task.Checked)
+	}
+
+	out=out + `<form action="addWaypoint" method="post" >
+	<input type="hidden" id="q" name="q" value="` + path + 
+	`"><input id="title" name="title" type="text">
+	<input id="content" name="content" type="text"
+	><input type="submit"  value="Add"></form>` + 
+	`<form action="deleteWaypoint" method="post"  >
+	<input type="hidden" id="q" name="q" value="` + 
+	path + `"><input type="submit" value="Delete"></form>` + 
+	`<form action="editWaypoint" method="post">
+	<input type="hidden" id="q" name="q" value="` + path + 
+	`"><input id="title" name="title" type="text" value="` + t.Name + 
+	`"><input id="content" name="content" type="text" value="` + t.Text + 
+	`"><input type="submit" value="Update">`
+	return out
+
 }
 
 func detailed(c *gin.Context, id string, token string) {
@@ -159,7 +189,7 @@ func detailed(c *gin.Context, id string, token string) {
   <style>`+ styleCss + `</style>
 </head>
 <body>
-   ` + taskDisplay(id, q, true, -1) + `
+   ` + detailedTaskDisplay(id, q,  -1) + `
 </body>
 </html>
 `))
@@ -324,10 +354,12 @@ func buildItem(picurl, thumburl, path, description, extradescription string, che
 	  return out
 }
 
-func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int) string {
+
+
+func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 	
 	out := ""
-	//log.Println("Loading tasks for", path)
+	log.Println("Loading tasks for", path)
 	//if task == nil Do string to task
 	if task == nil {
 		task = FindTask(path, LoadJson(id))
@@ -337,8 +369,9 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 	}
 	var contents = task.Text
 	if !task.Deleted {
+		
 		if len(task.SubTasks) > 0 {
-			fmt.Println(path, "is a container task")
+			//fmt.Println(path, "is a container task")
 			out=out+` 
 		<div class="comment `+oddEven(alternator)+`-depth" id="io7v1nv">
 			<details open>
@@ -369,7 +402,7 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 			if depth != 0 {
 			for i, f := range tasks {
 				//log.Println("Loading task", f.Name)
-				out = out + loadTasks(id, path+"/"+f.Id, f, detailed, depth-1, alternator+i+1)
+				out = out + detailedTasks(f.Id, path+"/"+f.Id, f, depth-1, alternator+i+1)
 			}
 
 			out=out+`</details></div>`
@@ -380,8 +413,7 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 			//fmt.Println(path, "is leaf task")
 			var contents = task.Text
 
-			if detailed {
-
+			
 				out=out+` 
 			<div class="comment `+oddEven(alternator)+`-depth" id="io7v1nv">
 				<details open>
@@ -407,11 +439,9 @@ func loadTasks(id, path string, task *Task, detailed bool, depth, alternator int
 				  /*
 				out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a><p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
 				*/
-			} else {
-				out=out+buildItem("","",path, task.Name, task.Id, task.Checked)				
-				//out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a></li>"
-			}
+			
 		}
+	
 	}
 	return out
 }
@@ -426,12 +456,12 @@ func restoreAllDisplay(c *gin.Context, id string, token string) {
 	</html>`))
 }
 
-func taskDisplay(id, path string, detailed bool, depth int) string {
+func detailedTaskDisplay(id, path string,  depth int) string {
 	task := FindTask(path, LoadJson(id))
 	if task == nil {
 		panic("Task not found " + path)
 	}
-	return loadTasks(id, path, nil, detailed, depth,0) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit"  value="Add"></form>` + `<form action="deleteWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input type="submit" value="Delete"></form>` + `<form action="editWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text" value="` + task.Name + `"><input id="content" name="content" type="text" value="` + task.Text + `"><input type="submit" value="Update"></form>`
+	return detailedTasks(id, path, task, depth,0) + `<form action="addWaypoint" method="post" ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text"><input id="content" name="content" type="text"><input type="submit"  value="Add"></form>` + `<form action="deleteWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input type="submit" value="Delete"></form>` + `<form action="editWaypoint" method="post"  ><input type="hidden" id="q" name="q" value="` + path + `"><input id="title" name="title" type="text" value="` + task.Name + `"><input id="content" name="content" type="text" value="` + task.Text + `"><input type="submit" value="Update"></form>`
 
 }
 
