@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	_ "embed"
+	"math/rand"
 
 	//"github.com/gin-gonic/autotls"
 
@@ -111,9 +112,8 @@ func oddEven(i int) string {
 	}
 }
 
-func summary(c *gin.Context, id string, token string) {
-
-	c.Writer.Write([]byte(`
+func standardHeader() string {
+	return `
 <!DOCTYPE html>
 <html>
 <head>
@@ -122,7 +122,7 @@ func summary(c *gin.Context, id string, token string) {
   <style>`+ styleCss + `</style>
   </head>
 
-<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="summary"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="summary"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="/new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
+<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="summary"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="summary"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="summary?filter=new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
 
 </li><li><a href="restoreAllPage">Restore</a></li></ul></div></header><div id="intro">
 <h1>Welcome to Unfinished Business</h1>
@@ -135,18 +135,28 @@ func summary(c *gin.Context, id string, token string) {
 
 
 
-   ` + summaryView(id, str2md5("nodes"), nil) + `
-   </div>
-  <!-- 4 include the jQuery library -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
-</style>
-</div>
-</body>
-</html>
-`))
+   `
 }
 
-func summaryView(id, path string, t *Task) string{
+func standardFooter() string {
+	return `
+	</div>
+   <!-- 4 include the jQuery library -->
+   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
+ </style>
+ </div>
+ </body>
+ </html>
+ `
+}
+
+func summary(c *gin.Context, id string, token string) {
+	filter := c.Query("filter")
+
+	  c.Writer.Write([]byte(standardHeader() + summaryView(id, str2md5("nodes"), nil, filter) + standardFooter()))
+}
+
+func summaryView(id, path string, t *Task, filter string) string{
 	if t == nil {
 		t = FindTask(path, LoadJson(id))
 	}
@@ -155,10 +165,16 @@ func summaryView(id, path string, t *Task) string{
 		return ""
 	}
 	for _, task := range t.SubTasks {
-		if !task.Deleted {
-		subPath := path + "/" + task.Id
-		out = out + buildItem("","", subPath, task.Name, task.Id, task.Checked)
+		if task.Deleted {
+			continue
 		}
+		if filter == "new" && task.Checked {
+			continue
+		}
+		
+		subPath := path + "/" + task.Id
+		out =out + buildItem("","", subPath, task.Name, task.Id, task.Checked)
+		
 	}
 
 	out=out + `<form action="addWaypoint" method="post" >
@@ -180,37 +196,16 @@ func summaryView(id, path string, t *Task) string{
 
 func detailed(c *gin.Context, id string, token string) {
 	q := c.Query("q")
-	c.Writer.Write([]byte(`
-	<!DOCTYPE html>
-	<html>
-	<head>
-	  <meta charset="utf-8">
-	  <title>Unfinished Business</title>
-	  <style>`+ styleCss + `</style>
-	  </head>
-	
-	<body class="dark"><div id="topbar"><nav><div class="nav-item left"><a href="summary"><img src="/favicon.png" alt="">unfinished business</a></div><div class="settings"><div class="icon-container"><a href="/about">[about]</a></div><div class="icon-container"><a href="/preferences">[preferences]</a></div></div></nav><div class="top-links"><a href="/r/Popular">Popular</a><a href="/r/All">All</a><a href="/saved">Saved</a><a href="/r/AskReddit">AskReddit</a><a href="/r/pics">pics</a><a href="/r/news">news</a><a href="/r/worldnews">worldnews</a><a href="/r/funny">funny</a><a href="/r/tifu">tifu</a><a href="/r/videos">videos</a><a href="/r/gaming">gaming</a><a href="/r/aww">aww</a><a href="/r/todayilearned">todayilearned</a><a href="/r/gifs">gifs</a><a href="/r/Art">Art</a><a href="/r/explainlikeimfive">explainlikeimfive</a><a href="/r/movies">movies</a><a href="/r/Jokes">Jokes</a><a href="/r/TwoXChromosomes">TwoXChromosomes</a><a href="/r/mildlyinteresting">mildlyinteresting</a><a href="/r/LifeProTips">LifeProTips</a><a href="/r/askscience">askscience</a><a href="/r/IAmA">IAmA</a><a href="/r/dataisbeautiful">dataisbeautiful</a><a href="/r/books">books</a><a href="/r/science">science</a><a href="/r/Showerthoughts">Showerthoughts</a><a href="/r/gadgets">gadgets</a><a href="/r/Futurology">Futurology</a><a href="/r/nottheonion">nottheonion</a><a href="/r/history">history</a><a href="/r/sports">sports</a><a href="/r/OldSchoolCool">OldSchoolCool</a><a href="/r/GetMotivated">GetMotivated</a><a href="/r/DIY">DIY</a><a href="/r/photoshopbattles">photoshopbattles</a><a href="/r/nosleep">nosleep</a><a href="/r/Music">Music</a><a href="/r/space">space</a><a href="/r/food">food</a><a href="/r/UpliftingNews">UpliftingNews</a><a href="/r/EarthPorn">EarthPorn</a><a href="/r/Documentaries">Documentaries</a><a href="/r/InternetIsBeautiful">InternetIsBeautiful</a><a href="/r/WritingPrompts">WritingPrompts</a><a href="/r/creepy">creepy</a><a href="/r/philosophy">philosophy</a><a href="/r/announcements">announcements</a><a href="/r/listentothis">listentothis</a><a href="/r/blog">blog</a><a href="/subreddits" id="sr-more-link">more »</a></div></div><header><a class="main" href="summary"><h1>unfinished business</h1></a><div class="bottom"><ul class="tabmenu"><li class="active"><a href="/">hot</a></li><li><a href="/new">new</a></li><li><a href="/rising">rising</a></li><li><a href="downloadAll">Backup</a>
-	
-	</li><li><a href="restoreAllPage">Restore</a></li></ul></div></header><div id="intro">
-	<h1>Welcome to Unfinished Business</h1>
-	<h2>the online hierarchical task manager.</h2>
-	</div>
-	
-	
-	<div class="sr" id="links">
-	
-	
-	
-	
-	   ` +  detailedTaskDisplay(id, q,  -1)+ `
-	   </div>
-	  <!-- 4 include the jQuery library -->
-	  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.1/jquery.min.js"></script>
-	</style>
-	</div>
-	</body>
-	</html>
-	`))
+	if q == "" {
+		q = c.PostForm("q")
+	}
+	fmt.Println("Loading detailed view for", q)
+	c.Writer.Write([]byte(standardHeader() +  detailedTaskDisplay(id, q,  -1)+ standardFooter()))
+}
+
+func detailedNode(c *gin.Context, id string, token string, path string) {
+	fmt.Println("Loading detailed view for", path)
+	c.Writer.Write([]byte(standardHeader() +  detailedTaskDisplay(id, path,  -1)+ standardFooter()))
 }
 
 func restoreAll(c *gin.Context, id string, token string) {
@@ -232,17 +227,22 @@ func addWaypoint(c *gin.Context, id string, token string) {
 	topNode := LoadJson(id)
 	t := FindTask(quest, topNode)
 	
-		log.Println("Adding waypoint", path)
-		newTask := Task{Id: fmt.Sprintf("%x", md5.Sum([]byte(title+content))),Name: title, Text: content, TimeStamp: time.Now()}
-		t.SubTasks = append(t.SubTasks, &newTask)
-		SaveJson(id, topNode)
+	log.Println("Adding waypoint", path)
+	randomStr := fmt.Sprintf("%v", rand.Int())
+	timeStr := time.Now().Format("2006-01-02 15:04:05")
+	
+	newTask := Task{Id: fmt.Sprintf("%x", md5.Sum([]byte(title+content+timeStr+randomStr))),Name: title, Text: content, TimeStamp: time.Now()}
+	t.SubTasks = append(t.SubTasks, &newTask)
+	SaveJson(id, topNode)
 
-	summary(c, id, token)
+	detailed(c, id, token)
 }
 
 func deleteWaypoint(c *gin.Context, id string, token string) {
 	quest := c.PostForm("q")
-
+	if quest == "" {
+		quest = c.Query("q")
+	}
 	topNode := LoadJson(id)
 	t := FindTask(quest, topNode)
 
@@ -254,7 +254,9 @@ func deleteWaypoint(c *gin.Context, id string, token string) {
 		SaveJson(id, topNode)
 	}
 
-	summary(c, id, token)
+
+	parentPath := strings.TrimSuffix(quest, "/"+t.Id)
+	detailedNode(c, id, token, parentPath)
 }
 
 func editWaypoint(c *gin.Context, id string, token string) {
@@ -377,7 +379,7 @@ func buildItem(picurl, thumburl, path, description, extradescription string, che
 func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 	
 	out := ""
-	log.Println("Loading tasks for", path)
+	//log.Println("Loading tasks for", path)
 	//if task == nil Do string to task
 	if task == nil {
 		task = FindTask(path, LoadJson(id))
@@ -386,6 +388,10 @@ func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 		return ""
 	}
 	var contents = task.Text
+	checkedStatus := ""
+			if task.Checked {
+				checkedStatus =`checked="checked"`
+				}
 	if !task.Deleted {
 		
 		if len(task.SubTasks) > 0 {
@@ -408,9 +414,9 @@ func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 			  </p>
 			  <p class="stickied"></p>
 			</div>
-			<div class="body"><div class="md"><p>` + task.Name  + string(contents) + `</p>
+			<div class="body"><div class="md"><p><input type="checkbox" `+ checkedStatus+ ` onclick="$.get('toggle?path=`+path+`')">` + task.Name  + string(contents) + `</p>
 		`
-			out = out + buildItem("","", path, task.Name, task.Id, task.Checked)
+			//out = out + buildItem("","", path, task.Name, task.Id, task.Checked)
 			
 			/*
 			fmt.Sprintf("<li><input type=\"checkbox\" "+isTaskChecked(task)+" onclick=\"$.get('toggle?path=%s')\"><a href=\"detailed?q=%s\">", path, path) + task.Name + "</a><ul>"
@@ -455,10 +461,13 @@ func detailedTasks(id, path string, task *Task,  depth, alternator int) string {
 				</div>
 				<div class="body"><div class="md"><p>
 				<input type="checkbox" `+ checkedStatus+ ` onclick="$.get('toggle?path=`+path+`')">` + task.Name  + string(contents) + `</p>
-  			</details></div>
+				<span style="color: #878A8C; font-size: 12px; font-style: bold; font-weight:bold">Reply <a style="color: #878A8C; font-size: 12px; font-style: bold; font-weight:bold" href="detailed?q=`+path+`">Open</a> <a style="color: #878A8C; font-size: 12px; font-style: bold; font-weight:bold" href="deleteWaypoint?q=` + path + `">Delete</a></span>
+  			</details>
+			
+			</div>
 			
 				  `
-				  /*
+				  /*-
 				out = out + "<li><input type=\"checkbox\"  " + isTaskChecked(task) + " onclick=\"$.get('toggle?path=" + path + "')\">" + task.Name + " <a href=\"detailed?q=" + path + "\">+</a><p style=\"margin-left: 10em\">" + string(contents) + "</p>" + "</li>"
 				*/
 			
@@ -514,6 +523,7 @@ func serveQuester(router *gin.Engine, prefix string) {
 	router.GET(prefix+"detailed", makeAuthed(detailed))
 	router.POST(prefix+"addWaypoint", makeAuthed(addWaypoint))
 	router.POST(prefix+"deleteWaypoint", makeAuthed(deleteWaypoint))
+	router.GET(prefix+"deleteWaypoint", makeAuthed(deleteWaypoint))
 
 	router.POST(prefix+"editWaypoint", makeAuthed(editWaypoint))
 
