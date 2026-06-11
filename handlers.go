@@ -1,0 +1,368 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+const maxRestoreBytes = 10 << 20
+
+var (
+	errTaskNotFound     = errors.New("task not found")
+	errCannotDeleteRoot = errors.New("cannot delete the root task")
+)
+
+type App struct {
+	store     *Store
+	base      string
+	prefix    string
+	templates *template.Template
+}
+
+func NewApp(store *Store, prefix string) *App {
+	base, normalized := normalizeRoutePrefix(prefix)
+	return &App{
+		store:     store,
+		base:      base,
+		prefix:    normalized,
+		templates: newTemplates(),
+	}
+}
+
+func normalizeRoutePrefix(prefix string) (base string, normalized string) {
+	prefix = trimPrefix(prefix)
+	if prefix == "/" {
+		return "", "/"
+	}
+	return prefix, prefix + "/"
+}
+
+func (a *App) Register(router *gin.Engine) {
+	router.MaxMultipartMemory = maxRestoreBytes + (1 << 20)
+	if a.base == "" {
+		router.GET("/", a.redirectHome)
+	} else {
+		router.GET(a.base, a.redirectHome)
+	}
+	if a.prefix != "/" {
+		router.GET(a.prefix, a.redirectHome)
+	}
+	router.GET(a.prefix+"summary", a.authed(a.summary))
+	router.GET(a.prefix+"downloadAll", a.authed(a.downloadAll))
+	router.GET(a.prefix+"restoreAllPage", a.authed(a.restoreAllDisplay))
+	router.POST(a.prefix+"restoreAll", a.mutating(a.restoreAll))
+	router.GET(a.prefix+"detailed", a.authed(a.detailed))
+	router.POST(a.prefix+"addWaypoint", a.mutating(a.addWaypoint))
+	router.POST(a.prefix+"deleteWaypoint", a.mutating(a.deleteWaypoint))
+	router.POST(a.prefix+"editWaypoint", a.mutating(a.editWaypoint))
+	router.POST(a.prefix+"toggle", a.mutating(a.toggle))
+}
+
+type authedHandler func(*gin.Context, string)
+
+func (a *App) authed(handler authedHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.Request.Header.Get("authentigate-id")
+		if strings.TrimSpace(userID) == "" {
+			userID = defaultUserID
+		}
+		handler(c, userID)
+	}
+}
+
+func (a *App) mutating(handler authedHandler) gin.HandlerFunc {
+	authed := a.authed(handler)
+	return func(c *gin.Context) {
+		if !a.validMutationOrigin(c) {
+			a.renderError(c, http.StatusForbidden, "Cross-origin form submissions are not allowed.")
+			return
+		}
+		authed(c)
+	}
+}
+
+func (a *App) validMutationOrigin(c *gin.Context) bool {
+	origin := strings.TrimSpace(c.GetHeader("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && strings.EqualFold(parsed.Host, c.Request.Host)
+}
+
+func (a *App) redirectHome(c *gin.Context) {
+	c.Redirect(http.StatusFound, a.prefix+"summary")
+}
+
+func (a *App) summary(c *gin.Context, userID string) {
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+
+	filter := c.Query("filter")
+	next := c.Request.URL.RequestURI()
+	current := buildTaskNode(root, rootPath, a.prefix, next, 0)
+	summary := make([]*TaskNode, 0, len(root.SubTasks))
+	for _, child := range visibleChildren(root) {
+		if filter == "new" && child.Checked {
+			continue
+		}
+		summary = append(summary, buildTaskNode(child, joinTaskPath(rootPath, child.Id), a.prefix, next, 0))
+	}
+
+	a.render(c, http.StatusOK, "summary", PageData{
+		Title:   "Unfinished Business",
+		Filter:  filter,
+		Current: current,
+		Summary: summary,
+	})
+}
+
+func (a *App) detailed(c *gin.Context, userID string) {
+	path := normalizedPath(c.Query("q"))
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+
+	task := FindTask(path, root)
+	if task == nil || task.Deleted {
+		a.renderError(c, http.StatusNotFound, "Task not found.")
+		return
+	}
+
+	a.render(c, http.StatusOK, "detail", PageData{
+		Title:   task.Name + " - Unfinished Business",
+		Current: buildTaskNode(task, path, a.prefix, c.Request.URL.RequestURI(), 0),
+	})
+}
+
+func (a *App) downloadAll(c *gin.Context, userID string) {
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+
+	payload, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not encode tasks.")
+		return
+	}
+
+	c.Header("Content-Disposition", `attachment; filename="tasks.json"`)
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func (a *App) restoreAllDisplay(c *gin.Context, userID string) {
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+	a.render(c, http.StatusOK, "restore", PageData{
+		Title:   "Restore - Unfinished Business",
+		Current: buildTaskNode(root, rootPath, a.prefix, c.Request.URL.RequestURI(), 0),
+	})
+}
+
+func (a *App) restoreAll(c *gin.Context, userID string) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRestoreBytes+(1<<20))
+
+	fileHeader, err := c.FormFile("content")
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+			return
+		}
+		a.renderError(c, http.StatusBadRequest, "Choose a backup JSON file to restore.")
+		return
+	}
+	if fileHeader.Size > maxRestoreBytes {
+		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		a.renderError(c, http.StatusBadRequest, "Could not open the backup file.")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxRestoreBytes+1))
+	if err != nil {
+		a.renderError(c, http.StatusBadRequest, "Could not read the backup file.")
+		return
+	}
+	if len(data) > maxRestoreBytes {
+		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+		return
+	}
+
+	if err := a.store.Restore(userID, data); err != nil {
+		a.renderError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.prefix+"summary")
+}
+
+func (a *App) addWaypoint(c *gin.Context, userID string) {
+	parent := normalizedPath(c.PostForm("q"))
+	task := newTask(c.PostForm("title"), c.PostForm("content"))
+
+	err := a.store.Update(userID, func(root *Task) error {
+		parentTask := FindTask(parent, root)
+		if parentTask == nil || parentTask.Deleted {
+			return errTaskNotFound
+		}
+		parentTask.SubTasks = append(parentTask.SubTasks, task)
+		return nil
+	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.detailURL(parent))
+}
+
+func (a *App) deleteWaypoint(c *gin.Context, userID string) {
+	path := normalizedPath(c.PostForm("q"))
+	if isRootPath(path) {
+		a.handleMutationError(c, errCannotDeleteRoot)
+		return
+	}
+	parent := parentPath(path)
+
+	err := a.store.Update(userID, func(root *Task) error {
+		task := FindTask(path, root)
+		if task == nil || task.Deleted {
+			return errTaskNotFound
+		}
+		task.Deleted = true
+		return nil
+	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.detailURL(parent))
+}
+
+func (a *App) editWaypoint(c *gin.Context, userID string) {
+	path := normalizedPath(c.PostForm("q"))
+	title := c.PostForm("title")
+	content := c.PostForm("content")
+
+	err := a.store.Update(userID, func(root *Task) error {
+		task := FindTask(path, root)
+		if task == nil || task.Deleted {
+			return errTaskNotFound
+		}
+		task.Name = cleanTitle(title)
+		task.Text = strings.TrimSpace(content)
+		return nil
+	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.detailURL(path))
+}
+
+func (a *App) toggle(c *gin.Context, userID string) {
+	path := normalizedPath(c.PostForm("path"))
+
+	err := a.store.Update(userID, func(root *Task) error {
+		task := FindTask(path, root)
+		if task == nil || task.Deleted {
+			return errTaskNotFound
+		}
+		task.Checked = !task.Checked
+		return nil
+	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	a.redirectBack(c, a.detailURL(path))
+}
+
+func (a *App) handleMutationError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, errTaskNotFound):
+		a.renderError(c, http.StatusNotFound, "Task not found.")
+	case errors.Is(err, errCannotDeleteRoot):
+		a.renderError(c, http.StatusBadRequest, "The root task cannot be deleted.")
+	default:
+		log.Printf("mutation failed: %v", err)
+		a.renderError(c, http.StatusInternalServerError, "Could not save tasks.")
+	}
+}
+
+func (a *App) redirectBack(c *gin.Context, fallback string) {
+	next := c.PostForm("next")
+	if a.safeLocalPath(next) {
+		c.Redirect(http.StatusSeeOther, next)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, fallback)
+}
+
+func (a *App) safeLocalPath(path string) bool {
+	if path == "" || strings.Contains(path, "\n") || strings.Contains(path, "\r") {
+		return false
+	}
+	if strings.HasPrefix(path, "//") {
+		return false
+	}
+	return strings.HasPrefix(path, a.prefix)
+}
+
+func (a *App) detailURL(path string) string {
+	return a.prefix + "detailed?q=" + url.QueryEscape(normalizedPath(path))
+}
+
+func (a *App) render(c *gin.Context, status int, templateName string, data PageData) {
+	data.Style = template.CSS(styleCSS)
+	data.Prefix = a.prefix
+	data.RootPath = rootPath
+	if data.Title == "" {
+		data.Title = "Unfinished Business"
+	}
+	if data.CurrentURL == "" {
+		data.CurrentURL = c.Request.URL.RequestURI()
+	}
+	if data.Current == nil {
+		data.Current = buildTaskNode(defaultRoot(), rootPath, a.prefix, data.CurrentURL, 0)
+	}
+
+	c.Status(status)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	if err := a.templates.ExecuteTemplate(c.Writer, templateName, data); err != nil {
+		log.Printf("render %s failed: %v", templateName, err)
+	}
+}
+
+func (a *App) renderError(c *gin.Context, status int, message string) {
+	a.render(c, status, "error", PageData{
+		Title: fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Error: message,
+	})
+}

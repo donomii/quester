@@ -1,1 +1,5 @@
 *.exe
+/quester
+/.quester-data/
+/bin/
+/coverage.out

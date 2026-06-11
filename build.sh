@@ -1,6 +1,7 @@
 #!/bin/sh
 
-rm go.mod go.sum
-go mod init quester
-go mod tidy
-go build .
+set -eu
+
+go test ./...
+go vet ./...
+go build -o bin/quester .
