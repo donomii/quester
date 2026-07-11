@@ -7,8 +7,10 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -61,6 +63,8 @@ func (a *App) Register(router *gin.Engine) {
 	router.GET(a.prefix+"restoreAllPage", a.authed(a.restoreAllDisplay))
 	router.POST(a.prefix+"restoreAll", a.mutating(a.restoreAll))
 	router.GET(a.prefix+"detailed", a.authed(a.detailed))
+	router.GET(a.prefix+"document", a.authed(a.document))
+	router.POST(a.prefix+"attachDocument", a.mutating(a.attachDocument))
 	router.POST(a.prefix+"addWaypoint", a.mutating(a.addWaypoint))
 	router.POST(a.prefix+"deleteWaypoint", a.mutating(a.deleteWaypoint))
 	router.POST(a.prefix+"editWaypoint", a.mutating(a.editWaypoint))
@@ -116,12 +120,14 @@ func (a *App) summary(c *gin.Context, userID string) {
 	filter := c.Query("filter")
 	next := c.Request.URL.RequestURI()
 	current := buildTaskNode(root, rootPath, a.prefix, next, 0)
+	rootTrail := newDocTrail()
+	rootTrail.add(root, rootPath, a.prefix)
 	summary := make([]*TaskNode, 0, len(root.SubTasks))
 	for _, child := range visibleChildren(root) {
 		if filter == "new" && child.Checked {
 			continue
 		}
-		summary = append(summary, buildTaskNode(child, joinTaskPath(rootPath, child.Id), a.prefix, next, 0))
+		summary = append(summary, buildTaskNodeWithTrail(child, joinTaskPath(rootPath, child.Id), a.prefix, next, 0, rootTrail.clone()))
 	}
 
 	a.render(c, http.StatusOK, "summary", PageData{
@@ -140,16 +146,153 @@ func (a *App) detailed(c *gin.Context, userID string) {
 		return
 	}
 
+	chain := FindTaskChain(path, root)
+	if len(chain) == 0 || chain[len(chain)-1].Deleted {
+		a.renderError(c, http.StatusNotFound, "Task not found.")
+		return
+	}
+
+	a.render(c, http.StatusOK, "detail", PageData{
+		Title:   chain[len(chain)-1].Name + " - Unfinished Business",
+		Current: buildDetailNode(chain, a.prefix, c.Request.URL.RequestURI()),
+	})
+}
+
+func (a *App) document(c *gin.Context, userID string) {
+	path := normalizedPath(c.Query("q"))
+	docID := strings.TrimSpace(c.Query("doc"))
+
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
 	task := FindTask(path, root)
 	if task == nil || task.Deleted {
 		a.renderError(c, http.StatusNotFound, "Task not found.")
 		return
 	}
 
-	a.render(c, http.StatusOK, "detail", PageData{
-		Title:   task.Name + " - Unfinished Business",
-		Current: buildTaskNode(task, path, a.prefix, c.Request.URL.RequestURI(), 0),
+	var attachment *Attachment
+	for _, candidate := range task.Attachments {
+		if candidate != nil && candidate.Id == docID {
+			attachment = candidate
+			break
+		}
+	}
+	if attachment == nil {
+		a.renderError(c, http.StatusNotFound, "Document not found.")
+		return
+	}
+
+	file, info, err := a.store.OpenBlob(attachment.Blob)
+	if err != nil {
+		a.renderError(c, http.StatusNotFound, "Document content is missing.")
+		return
+	}
+	defer file.Close()
+
+	contentType, disposition := documentContentType(attachment.Name)
+	c.Header("Content-Type", contentType)
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": attachment.Name}))
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	http.ServeContent(c.Writer, c.Request, "", info.ModTime(), file)
+}
+
+// extraDocTypes covers extensions the Go mime table misses; consulted first
+// so the result does not depend on the host's /etc mime configuration.
+var extraDocTypes = map[string]string{
+	".md":       "text/markdown; charset=utf-8",
+	".markdown": "text/markdown; charset=utf-8",
+}
+
+// documentContentType picks the served type and whether the browser may
+// render it inline. Anything that could script on our origin (HTML, SVG,
+// unknown types) is forced to download.
+func documentContentType(name string) (contentType, disposition string) {
+	ext := strings.ToLower(filepath.Ext(name))
+	contentType = extraDocTypes[ext]
+	if contentType == "" {
+		contentType = mime.TypeByExtension(ext)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "application/octet-stream", "attachment"
+	}
+	switch {
+	case mediaType == "application/pdf",
+		mediaType == "text/plain",
+		mediaType == "text/markdown":
+		return contentType, "inline"
+	case mediaType == "image/svg+xml":
+		return contentType, "attachment"
+	case strings.HasPrefix(mediaType, "image/"),
+		strings.HasPrefix(mediaType, "video/"),
+		strings.HasPrefix(mediaType, "audio/"):
+		return contentType, "inline"
+	}
+	return contentType, "attachment"
+}
+
+// collectAttachments stores every "document" upload in the blob store and
+// returns records to hang on a task. Orphan blobs from a failed mutation are
+// harmless: content-addressed and reused on the next upload.
+func (a *App) collectAttachments(c *gin.Context) ([]*Attachment, error) {
+	if !strings.HasPrefix(c.ContentType(), "multipart/") {
+		return nil, nil
+	}
+	form, err := c.MultipartForm()
+	if err != nil {
+		return nil, err
+	}
+	var attachments []*Attachment
+	for _, header := range form.File["document"] {
+		if header.Filename == "" {
+			continue
+		}
+		file, err := header.Open()
+		if err != nil {
+			return nil, err
+		}
+		ref, size, err := a.store.SaveBlob(file)
+		file.Close()
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, newAttachment(header.Filename, ref, size))
+	}
+	return attachments, nil
+}
+
+func (a *App) attachDocument(c *gin.Context, userID string) {
+	path := normalizedPath(c.PostForm("q"))
+	attachments, err := a.collectAttachments(c)
+	if err != nil {
+		a.renderError(c, http.StatusBadRequest, "Could not read the attached documents.")
+		return
+	}
+	if len(attachments) == 0 {
+		a.renderError(c, http.StatusBadRequest, "Choose at least one document to attach.")
+		return
+	}
+
+	err = a.store.Update(userID, func(root *Task) error {
+		task := FindTask(path, root)
+		if task == nil || task.Deleted {
+			return errTaskNotFound
+		}
+		task.Attachments = append(task.Attachments, attachments...)
+		return nil
 	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.detailURL(path))
 }
 
 func (a *App) downloadAll(c *gin.Context, userID string) {
@@ -227,7 +370,14 @@ func (a *App) addWaypoint(c *gin.Context, userID string) {
 	parent := normalizedPath(c.PostForm("q"))
 	task := newTask(c.PostForm("title"), c.PostForm("content"))
 
-	err := a.store.Update(userID, func(root *Task) error {
+	attachments, err := a.collectAttachments(c)
+	if err != nil {
+		a.renderError(c, http.StatusBadRequest, "Could not read the attached documents.")
+		return
+	}
+	task.Attachments = attachments
+
+	err = a.store.Update(userID, func(root *Task) error {
 		parentTask := FindTask(parent, root)
 		if parentTask == nil || parentTask.Deleted {
 			return errTaskNotFound

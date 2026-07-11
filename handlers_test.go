@@ -258,6 +258,172 @@ func TestRootPrefixCanRegister(t *testing.T) {
 	}
 }
 
+func TestAttachAndServeDocumentFlow(t *testing.T) {
+	app, router := newTestApp(t)
+	postForm(t, router, "/quester/addWaypoint", url.Values{"q": {rootPath}, "title": {"Doc task"}})
+
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := rootPath + "/" + root.SubTasks[0].Id
+
+	attach := postMultipart(t, router, "/quester/attachDocument", url.Values{"q": {path}}, []testUpload{
+		{"document", "notes.txt", "first version"},
+	})
+	attach.Body.Close()
+	if attach.StatusCode != http.StatusSeeOther {
+		t.Fatalf("attach status = %d, want 303", attach.StatusCode)
+	}
+
+	root, err = app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := root.SubTasks[0].Attachments
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %#v, want 1", attachments)
+	}
+	record := attachments[0]
+	if record.Name != "notes.txt" || record.Size != int64(len("first version")) || !isBlobRef(record.Blob) {
+		t.Fatalf("attachment record = %#v", record)
+	}
+
+	doc := performRequest(router, http.MethodGet, "/quester/document?q="+url.QueryEscape(path)+"&doc="+url.QueryEscape(record.Id), nil)
+	body := readBody(t, doc)
+	doc.Body.Close()
+	if doc.StatusCode != http.StatusOK || body != "first version" {
+		t.Fatalf("document status = %d body = %q", doc.StatusCode, body)
+	}
+	if got := doc.Header.Get("Content-Disposition"); !strings.HasPrefix(got, "inline") || !strings.Contains(got, "notes.txt") {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
+	if got := doc.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := doc.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+
+	detail := performRequest(router, http.MethodGet, "/quester/detailed?q="+url.QueryEscape(path), nil)
+	detailBody := readBody(t, detail)
+	detail.Body.Close()
+	if !strings.Contains(detailBody, "notes.txt") || !strings.Contains(detailBody, "Documents here") {
+		t.Fatalf("detail page missing attachment: %s", detailBody)
+	}
+}
+
+func TestAddWaypointCarriesDocument(t *testing.T) {
+	app, router := newTestApp(t)
+	resp := postMultipart(t, router, "/quester/addWaypoint", url.Values{
+		"q":     {rootPath},
+		"title": {"Reply with doc"},
+	}, []testUpload{{"document", "spec.md", "updated spec"}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("add status = %d, want 303", resp.StatusCode)
+	}
+
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.SubTasks) != 1 || len(root.SubTasks[0].Attachments) != 1 {
+		t.Fatalf("tasks = %#v", root.SubTasks)
+	}
+	if got := root.SubTasks[0].Attachments[0].Name; got != "spec.md" {
+		t.Fatalf("attachment name = %q, want spec.md", got)
+	}
+}
+
+func TestDocumentBlocksActiveContentAndUnknownIDs(t *testing.T) {
+	app, router := newTestApp(t)
+	resp := postMultipart(t, router, "/quester/addWaypoint", url.Values{
+		"q":     {rootPath},
+		"title": {"Evil"},
+	}, []testUpload{{"document", "evil.html", "<script>alert(1)</script>"}})
+	resp.Body.Close()
+
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := rootPath + "/" + root.SubTasks[0].Id
+	record := root.SubTasks[0].Attachments[0]
+
+	doc := performRequest(router, http.MethodGet, "/quester/document?q="+url.QueryEscape(path)+"&doc="+url.QueryEscape(record.Id), nil)
+	doc.Body.Close()
+	if got := doc.Header.Get("Content-Disposition"); !strings.HasPrefix(got, "attachment") {
+		t.Fatalf("html Content-Disposition = %q, want attachment", got)
+	}
+
+	missing := performRequest(router, http.MethodGet, "/quester/document?q="+url.QueryEscape(path)+"&doc=../../etc/passwd", nil)
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing doc status = %d, want 404", missing.StatusCode)
+	}
+
+	empty := postMultipart(t, router, "/quester/attachDocument", url.Values{"q": {path}}, nil)
+	empty.Body.Close()
+	if empty.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty attach status = %d, want 400", empty.StatusCode)
+	}
+}
+
+func TestDocumentContentTypeChoosesSafeDisposition(t *testing.T) {
+	cases := []struct {
+		name            string
+		wantTypePrefix  string
+		wantDisposition string
+	}{
+		{"notes.md", "text/markdown", "inline"},
+		{"notes.txt", "text/plain", "inline"},
+		{"photo.png", "image/png", "inline"},
+		{"page.html", "text/html", "attachment"},
+		{"vector.svg", "image/svg+xml", "attachment"},
+		{"blob.xyz-unknown", "application/octet-stream", "attachment"},
+	}
+	for _, tc := range cases {
+		gotType, gotDisposition := documentContentType(tc.name)
+		if !strings.HasPrefix(gotType, tc.wantTypePrefix) || gotDisposition != tc.wantDisposition {
+			t.Fatalf("documentContentType(%q) = %q, %q, want %s*, %s",
+				tc.name, gotType, gotDisposition, tc.wantTypePrefix, tc.wantDisposition)
+		}
+	}
+}
+
+type testUpload struct {
+	field   string
+	name    string
+	content string
+}
+
+func postMultipart(t *testing.T, router http.Handler, target string, fields url.Values, files []testUpload) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, values := range fields {
+		for _, value := range values {
+			if err := writer.WriteField(key, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, file := range files {
+		part, err := writer.CreateFormFile(file.field, file.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte(file.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return performRequest(router, http.MethodPost, target, &body, writer.FormDataContentType())
+}
+
 func postForm(t *testing.T, router http.Handler, target string, form url.Values) *http.Response {
 	t.Helper()
 	return performRequest(router, http.MethodPost, target, strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")

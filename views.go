@@ -2,7 +2,11 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
 	"html/template"
+	"maps"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -23,20 +27,85 @@ type PageData struct {
 }
 
 type TaskNode struct {
-	ID         string
-	Prefix     string
-	Name       string
-	Text       string
-	Path       string
-	Next       string
-	Created    string
-	DepthClass string
-	Checked    bool
-	CanDelete  bool
-	Children   []*TaskNode
+	ID          string
+	Prefix      string
+	Name        string
+	Text        string
+	Path        string
+	Next        string
+	Created     string
+	DepthClass  string
+	Checked     bool
+	CanDelete   bool
+	Attachments []*DocumentNode
+	Documents   []*DocumentNode
+	Children    []*TaskNode
+}
+
+// DocumentNode is one attachment prepared for rendering. Version counts the
+// attachments sharing this Name along the path from the root, so the highest
+// version at a node is the document in effect there.
+type DocumentNode struct {
+	Name      string
+	URL       string
+	Size      string
+	Version   int
+	Attached  string
+	Origin    string
+	OriginURL string
+}
+
+// docTrail accumulates document versions along a root-to-node path so the
+// deepest attachment of each file name wins.
+type docTrail struct {
+	counts  map[string]int
+	current map[string]*DocumentNode
+}
+
+func newDocTrail() *docTrail {
+	return &docTrail{counts: map[string]int{}, current: map[string]*DocumentNode{}}
+}
+
+func (t *docTrail) clone() *docTrail {
+	return &docTrail{counts: maps.Clone(t.counts), current: maps.Clone(t.current)}
+}
+
+func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
+	var added []*DocumentNode
+	for _, attachment := range task.Attachments {
+		if attachment == nil {
+			continue
+		}
+		t.counts[attachment.Name]++
+		doc := &DocumentNode{
+			Name:      attachment.Name,
+			URL:       prefix + "document?q=" + url.QueryEscape(path) + "&doc=" + url.QueryEscape(attachment.Id),
+			Size:      humanSize(attachment.Size),
+			Version:   t.counts[attachment.Name],
+			Attached:  formatTaskTime(attachment.TimeStamp),
+			Origin:    task.Name,
+			OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
+		}
+		t.current[attachment.Name] = doc
+		added = append(added, doc)
+	}
+	return added
+}
+
+func (t *docTrail) snapshot() []*DocumentNode {
+	docs := slices.Collect(maps.Values(t.current))
+	slices.SortFunc(docs, func(a, b *DocumentNode) int { return strings.Compare(a.Name, b.Name) })
+	return docs
 }
 
 func buildTaskNode(task *Task, path, prefix, next string, depth int) *TaskNode {
+	return buildTaskNodeWithTrail(task, path, prefix, next, depth, newDocTrail())
+}
+
+// buildTaskNodeWithTrail renders a subtree. The trail carries document
+// versions inherited from ancestors and is cloned per child so sibling
+// branches stay isolated.
+func buildTaskNodeWithTrail(task *Task, path, prefix, next string, depth int, trail *docTrail) *TaskNode {
 	path = normalizedPath(path)
 	node := &TaskNode{
 		ID:         task.Id,
@@ -50,10 +119,44 @@ func buildTaskNode(task *Task, path, prefix, next string, depth int) *TaskNode {
 		Checked:    task.Checked,
 		CanDelete:  !isRootPath(path),
 	}
+	node.Attachments = trail.add(task, path, prefix)
+	node.Documents = trail.snapshot()
 	for _, child := range visibleChildren(task) {
-		node.Children = append(node.Children, buildTaskNode(child, joinTaskPath(path, child.Id), prefix, next, depth+1))
+		node.Children = append(node.Children, buildTaskNodeWithTrail(child, joinTaskPath(path, child.Id), prefix, next, depth+1, trail.clone()))
 	}
 	return node
+}
+
+// buildDetailNode renders the task at the end of chain with the document
+// state inherited from its ancestors.
+func buildDetailNode(chain []*Task, prefix, next string) *TaskNode {
+	trail := newDocTrail()
+	path := rootPath
+	for i, task := range chain {
+		if i > 0 {
+			path = joinTaskPath(path, task.Id)
+		}
+		if i == len(chain)-1 {
+			return buildTaskNodeWithTrail(task, path, prefix, next, 0, trail)
+		}
+		if !task.Deleted {
+			trail.add(task, path, prefix)
+		}
+	}
+	return nil
+}
+
+func humanSize(size int64) string {
+	switch {
+	case size < 1<<10:
+		return fmt.Sprintf("%d B", size)
+	case size < 1<<20:
+		return fmt.Sprintf("%d KB", size>>10)
+	case size < 1<<30:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1<<20))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(size)/(1<<30))
+	}
 }
 
 func formatTaskTime(t time.Time) string {
@@ -125,9 +228,23 @@ const pageTemplates = `
 
 {{define "detail"}}
 {{template "header" .}}
+	{{template "documents" .Current}}
 	{{template "taskTree" .Current}}
 	{{template "taskForms" .}}
 {{template "footer" .}}
+{{end}}
+
+{{define "documents"}}
+	{{if .Documents}}
+	<section class="panel documents">
+		<h2>Documents here</h2>
+		<ul class="attachments">
+			{{range .Documents}}
+			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
+			{{end}}
+		</ul>
+	</section>
+	{{end}}
 {{end}}
 
 {{define "restore"}}
@@ -163,7 +280,7 @@ const pageTemplates = `
 		<div class="entry">
 			<h2><a href="{{.Prefix}}detailed?q={{.Path}}">{{.Name}}</a></h2>
 			{{if .Text}}<p class="selftext">{{.Text}}</p>{{end}}
-			<p class="meta">submitted {{.Created}} <a class="comments" href="{{.Prefix}}detailed?q={{.Path}}">{{len .Children}} comments</a></p>
+			<p class="meta">submitted {{.Created}} <a class="comments" href="{{.Prefix}}detailed?q={{.Path}}">{{len .Children}} comments</a>{{if .Attachments}} <span class="comments">{{len .Attachments}} attached</span>{{end}}</p>
 		</div>
 	</article>
 {{end}}
@@ -182,6 +299,13 @@ const pageTemplates = `
 					<h2>{{.Name}}</h2>
 					{{if .Text}}<p>{{.Text}}</p>{{end}}
 				</div>
+				{{if .Attachments}}
+				<ul class="attachments">
+					{{range .Attachments}}
+					<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Size}}</span></li>
+					{{end}}
+				</ul>
+				{{end}}
 				<div class="links">
 					<a href="{{.Prefix}}detailed?q={{.Path}}">Open</a>
 					{{if .CanDelete}}
@@ -199,14 +323,25 @@ const pageTemplates = `
 
 {{define "taskForms"}}
 	<section class="forms">
-		<form action="{{.Prefix}}addWaypoint" method="post">
+		<form action="{{.Prefix}}addWaypoint" method="post" enctype="multipart/form-data">
 			<h2>Add task</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="title">Title</label>
 			<input id="title" name="title" type="text" autocomplete="off" required>
 			<label for="content">Notes</label>
 			<textarea id="content" name="content" rows="3"></textarea>
+			<label for="document">Attach</label>
+			<input id="document" name="document" type="file" multiple>
 			<button type="submit">Add</button>
+		</form>
+
+		<form action="{{.Prefix}}attachDocument" method="post" enctype="multipart/form-data">
+			<h2>Attach documents</h2>
+			<input type="hidden" name="q" value="{{.Current.Path}}">
+			<label for="attach-document">Files</label>
+			<input id="attach-document" name="document" type="file" multiple required>
+			<button type="submit">Attach</button>
+			<p class="meta">Reusing a file name adds a new version for this task and everything under it.</p>
 		</form>
 
 		<form action="{{.Prefix}}editWaypoint" method="post">

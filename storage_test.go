@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,70 @@ func TestStoreUpdatePersistsAtomicallyNamedFile(t *testing.T) {
 	}
 	if got := FindTask(rootPath+"/abc", root); got == nil || got.Name != "A" {
 		t.Fatalf("stored task = %#v, want A", got)
+	}
+}
+
+func TestSaveBlobIsContentAddressedAndDeduped(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const helloSHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+	ref, size, err := store.SaveBlob(strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != helloSHA256 || size != 5 {
+		t.Fatalf("SaveBlob = %q size %d, want %q size 5", ref, size, helloSHA256)
+	}
+
+	again, _, err := store.SaveBlob(strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != ref {
+		t.Fatalf("second SaveBlob = %q, want %q", again, ref)
+	}
+	files, err := os.ReadDir(filepath.Join(dir, blobDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("blob files = %d, want 1", len(files))
+	}
+
+	file, info, err := store.OpenBlob(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" || info.Size() != 5 {
+		t.Fatalf("blob content = %q size %d, want hello size 5", content, info.Size())
+	}
+}
+
+func TestOpenBlobRejectsUnsafeRefs(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{
+		"",
+		"..",
+		"../../etc/passwd",
+		strings.Repeat("A", 64),
+		strings.Repeat("a", 63),
+		strings.Repeat("g", 64),
+	} {
+		if _, _, err := store.OpenBlob(ref); err == nil {
+			t.Fatalf("OpenBlob(%q) succeeded, want error", ref)
+		}
 	}
 }
 

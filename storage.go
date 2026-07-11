@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
+
+const blobDirName = "blobs"
 
 type Store struct {
 	dir string
@@ -107,6 +110,83 @@ func (s *Store) saveUnlocked(fileID string, root *Task) error {
 		return fmt.Errorf("replace task file: %w", err)
 	}
 	return nil
+}
+
+// SaveBlob stores content under its SHA-256 and returns the reference.
+// Identical content shares one file, so writes need no lock: the rename is
+// atomic and any concurrent writer produces the same bytes.
+func (s *Store) SaveBlob(content io.Reader) (ref string, size int64, err error) {
+	blobDir := filepath.Join(s.dir, blobDirName)
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
+		return "", 0, fmt.Errorf("create blob directory: %w", err)
+	}
+
+	temp, err := os.CreateTemp(blobDir, "blob.*.tmp")
+	if err != nil {
+		return "", 0, fmt.Errorf("create temporary blob file: %w", err)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+
+	hash := sha256.New()
+	size, err = io.Copy(io.MultiWriter(temp, hash), content)
+	if err != nil {
+		temp.Close()
+		return "", 0, fmt.Errorf("write blob: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return "", 0, fmt.Errorf("sync blob: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return "", 0, fmt.Errorf("close blob: %w", err)
+	}
+
+	ref = hex.EncodeToString(hash.Sum(nil))
+	final := s.blobPath(ref)
+	if _, err := os.Stat(final); err == nil {
+		return ref, size, nil
+	}
+	if err := os.Rename(tempName, final); err != nil {
+		return "", 0, fmt.Errorf("store blob: %w", err)
+	}
+	return ref, size, nil
+}
+
+// OpenBlob opens stored blob content; the caller must close the file.
+func (s *Store) OpenBlob(ref string) (*os.File, os.FileInfo, error) {
+	if !isBlobRef(ref) {
+		return nil, nil, fmt.Errorf("invalid blob reference %q", ref)
+	}
+	file, err := os.Open(s.blobPath(ref))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open blob: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, nil, fmt.Errorf("stat blob: %w", err)
+	}
+	return file, info, nil
+}
+
+func (s *Store) blobPath(ref string) string {
+	return filepath.Join(s.dir, blobDirName, ref)
+}
+
+func isBlobRef(ref string) bool {
+	if len(ref) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range ref {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) path(fileID string) string {

@@ -14,6 +14,8 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 - Add a one-shot migration command for older `quester/*.json` data directories.
 - Add periodic backup guidance or an export reminder for long-running installs.
 - Consider file-locking if multiple Quester processes may share the same data directory.
+- Make backups self-contained: include `blobs/` content in downloadAll/restoreAll (zip archive).
+- Add garbage collection for blob files no longer referenced by any attachment record.
 
 ## Product
 
@@ -21,6 +23,8 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 - Add sort options for created time, completion state, and title.
 - Add due dates, priorities, or tags if the task model needs more structure.
 - Add an undo or restore view for soft-deleted tasks.
+- Show a document's full version history (which nodes carry which versions) in one view.
+- Add inline previews for image attachments on the detail page.
 - Add bulk actions for checking, deleting, or exporting selected tasks.
 
 ## Interface

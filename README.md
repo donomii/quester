@@ -26,6 +26,24 @@ run:
 
     ./bin/quester -data-dir quester
 
+## Attachments
+
+Any task or comment can carry file attachments. Attach files while adding a
+comment (the reply carries the new version) or with the attach form on the
+current task.
+
+Attachments sharing a file name are versions of one document. The detail page
+lists the documents in effect for the task you are viewing: the deepest
+attachment along the path from the root wins, so a version attached on a
+comment overrides versions attached above it — for that branch only.
+Re-attaching at a higher level re-baselines every branch that has not
+overridden the name.
+
+File content is stored once per unique file (SHA-256 content addressing) in
+`<data-dir>/blobs/`. The JSON backup from Backup/Restore carries attachment
+records but not file content; back up the whole data directory to keep
+attachments.
+
 ## Configuration
 
 Command-line flags:
