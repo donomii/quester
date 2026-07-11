@@ -50,6 +50,7 @@ type DocumentNode struct {
 	URL       string
 	Size      string
 	Version   int
+	Ref       string
 	Attached  string
 	Origin    string
 	OriginURL string
@@ -82,6 +83,7 @@ func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
 			URL:       prefix + "document?q=" + url.QueryEscape(path) + "&doc=" + url.QueryEscape(attachment.Id),
 			Size:      humanSize(attachment.Size),
 			Version:   t.counts[attachment.Name],
+			Ref:       shortRef(attachment.Blob),
 			Attached:  formatTaskTime(attachment.TimeStamp),
 			Origin:    task.Name,
 			OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
@@ -144,6 +146,17 @@ func buildDetailNode(chain []*Task, prefix, next string) *TaskNode {
 		}
 	}
 	return nil
+}
+
+// shortRef abbreviates a blob reference for display, like an abbreviated git
+// hash. Version numbers are per-branch, so parallel branches can each carry a
+// "v2" of the same name; the content id is what tells them apart — and equal
+// ids mean identical bytes.
+func shortRef(ref string) string {
+	if len(ref) > 8 {
+		return ref[:8]
+	}
+	return ref
 }
 
 func humanSize(size int64) string {
@@ -240,7 +253,7 @@ const pageTemplates = `
 		<h2>Documents here</h2>
 		<ul class="attachments">
 			{{range .Documents}}
-			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
+			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
 			{{end}}
 		</ul>
 	</section>
@@ -302,9 +315,19 @@ const pageTemplates = `
 				{{if .Attachments}}
 				<ul class="attachments">
 					{{range .Attachments}}
-					<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Size}}</span></li>
+					<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}}</span></li>
 					{{end}}
 				</ul>
+				{{end}}
+				{{if .Documents}}
+				<details class="docstate">
+					<summary>Documents in effect: {{len .Documents}}</summary>
+					<ul class="attachments">
+						{{range .Documents}}
+						<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a></span></li>
+						{{end}}
+					</ul>
+				</details>
 				{{end}}
 				<div class="links">
 					<a href="{{.Prefix}}detailed?q={{.Path}}">Open</a>

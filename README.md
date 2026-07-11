@@ -39,6 +39,12 @@ comment overrides versions attached above it — for that branch only.
 Re-attaching at a higher level re-baselines every branch that has not
 overridden the name.
 
+Version numbers count along a branch, so sibling branches can each carry
+their own v2 of a file. The short content id (a SHA-256 prefix) next to
+every version is what tells parallel versions apart — equal ids mean
+identical bytes. Every comment in the tree also carries a collapsed
+"Documents in effect" line showing the resolved set at that point.
+
 File content is stored once per unique file (SHA-256 content addressing) in
 `<data-dir>/blobs/`. The JSON backup from Backup/Restore carries attachment
 records but not file content; back up the whole data directory to keep

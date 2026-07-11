@@ -311,6 +311,12 @@ func TestAttachAndServeDocumentFlow(t *testing.T) {
 	if !strings.Contains(detailBody, "notes.txt") || !strings.Contains(detailBody, "Documents here") {
 		t.Fatalf("detail page missing attachment: %s", detailBody)
 	}
+	if !strings.Contains(detailBody, record.Blob[:8]) {
+		t.Fatalf("detail page missing content ref %s: %s", record.Blob[:8], detailBody)
+	}
+	if !strings.Contains(detailBody, "Documents in effect: 1") {
+		t.Fatalf("detail page missing in-effect line: %s", detailBody)
+	}
 }
 
 func TestAddWaypointCarriesDocument(t *testing.T) {

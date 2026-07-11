@@ -219,6 +219,16 @@ ul.attachments {
 	font-size: 15px;
 }
 
+.docstate {
+	margin: 6px 0;
+	padding: 0;
+}
+
+.comment .docstate > summary {
+	color: var(--muted);
+	font-size: 12px;
+}
+
 .forms .meta {
 	margin: 0;
 }
