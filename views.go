@@ -250,7 +250,7 @@ const pageTemplates = `
 {{define "documents"}}
 	{{if .Documents}}
 	<section class="panel documents">
-		<h2>Documents here</h2>
+		<h2>Documents at &ldquo;{{.Name}}&rdquo;</h2>
 		<ul class="attachments">
 			{{range .Documents}}
 			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
@@ -347,7 +347,7 @@ const pageTemplates = `
 {{define "taskForms"}}
 	<section class="forms">
 		<form action="{{.Prefix}}addWaypoint" method="post" enctype="multipart/form-data">
-			<h2>Add task</h2>
+			<h2>Add task under &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="title">Title</label>
 			<input id="title" name="title" type="text" autocomplete="off" required>
@@ -359,7 +359,7 @@ const pageTemplates = `
 		</form>
 
 		<form action="{{.Prefix}}attachDocument" method="post" enctype="multipart/form-data">
-			<h2>Attach documents</h2>
+			<h2>Attach documents to &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="attach-document">Files</label>
 			<input id="attach-document" name="document" type="file" multiple required>
@@ -368,7 +368,7 @@ const pageTemplates = `
 		</form>
 
 		<form action="{{.Prefix}}editWaypoint" method="post">
-			<h2>Edit current task</h2>
+			<h2>Edit &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="edit-title">Title</label>
 			<input id="edit-title" name="title" type="text" value="{{.Current.Name}}" autocomplete="off" required>
@@ -379,7 +379,7 @@ const pageTemplates = `
 
 		{{if .Current.CanDelete}}
 		<form action="{{.Prefix}}deleteWaypoint" method="post">
-			<h2>Delete current task</h2>
+			<h2>Delete &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<button class="danger" type="submit">Delete</button>
 		</form>

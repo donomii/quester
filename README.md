@@ -29,8 +29,10 @@ run:
 ## Attachments
 
 Any task or comment can carry file attachments. Attach files while adding a
-comment (the reply carries the new version) or with the attach form on the
-current task.
+comment (the reply carries the new version) or with the attach form on a
+task's own page. Every page belongs to exactly one task — the one the `q`
+path in the URL ends at; the Open link on a comment leads to that comment's
+own page, where the panel and forms act on it.
 
 Attachments sharing a file name are versions of one document. The detail page
 lists the documents in effect for the task you are viewing: the deepest

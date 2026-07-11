@@ -308,7 +308,7 @@ func TestAttachAndServeDocumentFlow(t *testing.T) {
 	detail := performRequest(router, http.MethodGet, "/quester/detailed?q="+url.QueryEscape(path), nil)
 	detailBody := readBody(t, detail)
 	detail.Body.Close()
-	if !strings.Contains(detailBody, "notes.txt") || !strings.Contains(detailBody, "Documents here") {
+	if !strings.Contains(detailBody, "notes.txt") || !strings.Contains(detailBody, "Documents at") {
 		t.Fatalf("detail page missing attachment: %s", detailBody)
 	}
 	if !strings.Contains(detailBody, record.Blob[:8]) {
