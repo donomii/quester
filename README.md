@@ -28,29 +28,31 @@ run:
 
 ## Attachments
 
-Everything in quester is a task in one tree: a "post" is a task under the
-root, and a comment is a task under another task. Every task can carry file
-attachments. Attach files while adding a comment (the reply carries the new
-version) or with the attach form on a task's page. Every page belongs to
+A comment in quester is itself a task — same record, same forms, same page.
+The only relationship is "replies to": every comment replies to exactly one
+task, and a post replies to the front page, which is also a task (named
+Quester — a file attached there applies to everything). Every task can carry
+file attachments. Attach files while adding a comment (the reply carries the
+new version) or with the attach form on a task's page. Every page belongs to
 exactly one task — the one the `q` path in the URL ends at; the Open link on
 a comment leads to that comment's own page, where the panel and forms act on
 it.
 
-Attachments sharing a file name are versions of one document. Which version
-applies at a task is decided by walking up from that task, through its
-parents, to the root: the first copy of that file name met on the way up is
-the one in effect. So an attachment affects the task it is on and every task
-below it, siblings never affect each other, and attaching a copy higher up
-changes what applies everywhere below it except under tasks carrying their
-own copy.
+Attachments sharing a file name are versions of one document. To find the
+version in effect at a task: look at the task itself, then at the task it
+replies to, and so on toward the front page; the first copy of that name
+found wins (the newest one, if a task carries several). So an attachment
+affects the task it is on and every reply under it, parallel replies never
+affect each other, and attaching a copy nearer the post changes what applies
+for every reply under it except those carrying their own copy.
 
-Version numbers count the copies of a name met along that same upward chain,
-so two sibling comments can each show a "v2" that is a different file. The
+Version numbers count the copies of a name along that same chain of replies,
+so two parallel comments can each show a "v2" that is a different file. The
 short content id (a SHA-256 prefix) next to every version tells them apart —
-equal ids mean identical bytes. Every comment in the tree carries a collapsed
-"Documents in effect" line showing what applies at that comment, and every
-entry in the documents panel links to a history page for that file name: the
-copies met on the upward walk, and every copy attached on tasks below.
+equal ids mean identical bytes. Every comment carries a collapsed "Documents
+in effect" line showing what applies at that comment, and every entry in the
+documents panel links to a history page for that file name: the copies found
+along the reply chain, and every copy attached on replies below.
 
 File content is stored once per unique file (SHA-256 content addressing) in
 `<data-dir>/blobs/`. The JSON backup from Backup/Restore carries attachment
