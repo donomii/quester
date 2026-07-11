@@ -23,7 +23,6 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 - Add sort options for created time, completion state, and title.
 - Add due dates, priorities, or tags if the task model needs more structure.
 - Add an undo or restore view for soft-deleted tasks.
-- Show a document's full version history (which nodes carry which versions) in one view.
 - Add inline previews for image attachments on the detail page.
 - Add bulk actions for checking, deleting, or exporting selected tasks.
 

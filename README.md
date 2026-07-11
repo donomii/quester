@@ -48,7 +48,9 @@ Version numbers count the copies of a name met along that same upward chain,
 so two sibling comments can each show a "v2" that is a different file. The
 short content id (a SHA-256 prefix) next to every version tells them apart —
 equal ids mean identical bytes. Every comment in the tree carries a collapsed
-"Documents in effect" line showing what applies at that comment.
+"Documents in effect" line showing what applies at that comment, and every
+entry in the documents panel links to a history page for that file name: the
+copies met on the upward walk, and every copy attached on tasks below.
 
 File content is stored once per unique file (SHA-256 content addressing) in
 `<data-dir>/blobs/`. The JSON backup from Backup/Restore carries attachment

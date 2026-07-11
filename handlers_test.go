@@ -398,6 +398,57 @@ func TestDocumentContentTypeChoosesSafeDisposition(t *testing.T) {
 	}
 }
 
+func TestDocumentHistoryPage(t *testing.T) {
+	app, router := newTestApp(t)
+	postMultipart(t, router, "/quester/addWaypoint", url.Values{
+		"q":     {rootPath},
+		"title": {"Doc task"},
+	}, []testUpload{{"document", "spec.md", "one"}}).Body.Close()
+
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := rootPath + "/" + root.SubTasks[0].Id
+	baseRef := root.SubTasks[0].Attachments[0].Blob[:8]
+
+	postMultipart(t, router, "/quester/addWaypoint", url.Values{
+		"q":     {path},
+		"title": {"Reply"},
+	}, []testUpload{{"document", "spec.md", "two-two"}}).Body.Close()
+
+	root, err = app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replyRef := root.SubTasks[0].SubTasks[0].Attachments[0].Blob[:8]
+
+	resp := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path)+"&name=spec.md", nil)
+	body := readBody(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("history status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, baseRef) || !strings.Contains(body, replyRef) {
+		t.Fatalf("history missing refs %s/%s: %s", baseRef, replyRef, body)
+	}
+	if !strings.Contains(body, "Copies on tasks below") {
+		t.Fatalf("history missing below section: %s", body)
+	}
+
+	noName := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path), nil)
+	noName.Body.Close()
+	if noName.StatusCode != http.StatusBadRequest {
+		t.Fatalf("history without name = %d, want 400", noName.StatusCode)
+	}
+
+	badTask := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(rootPath+"/missing")+"&name=spec.md", nil)
+	badTask.Body.Close()
+	if badTask.StatusCode != http.StatusNotFound {
+		t.Fatalf("history for missing task = %d, want 404", badTask.StatusCode)
+	}
+}
+
 type testUpload struct {
 	field   string
 	name    string

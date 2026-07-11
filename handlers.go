@@ -64,6 +64,7 @@ func (a *App) Register(router *gin.Engine) {
 	router.POST(a.prefix+"restoreAll", a.mutating(a.restoreAll))
 	router.GET(a.prefix+"detailed", a.authed(a.detailed))
 	router.GET(a.prefix+"document", a.authed(a.document))
+	router.GET(a.prefix+"documentHistory", a.authed(a.documentHistory))
 	router.POST(a.prefix+"attachDocument", a.mutating(a.attachDocument))
 	router.POST(a.prefix+"addWaypoint", a.mutating(a.addWaypoint))
 	router.POST(a.prefix+"deleteWaypoint", a.mutating(a.deleteWaypoint))
@@ -155,6 +156,31 @@ func (a *App) detailed(c *gin.Context, userID string) {
 	a.render(c, http.StatusOK, "detail", PageData{
 		Title:   chain[len(chain)-1].Name + " - Unfinished Business",
 		Current: buildDetailNode(chain, a.prefix, c.Request.URL.RequestURI()),
+	})
+}
+
+func (a *App) documentHistory(c *gin.Context, userID string) {
+	path := normalizedPath(c.Query("q"))
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
+		a.renderError(c, http.StatusBadRequest, "A document name is required.")
+		return
+	}
+
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+	chain := FindTaskChain(path, root)
+	if len(chain) == 0 || chain[len(chain)-1].Deleted {
+		a.renderError(c, http.StatusNotFound, "Task not found.")
+		return
+	}
+
+	a.render(c, http.StatusOK, "history", PageData{
+		Title:   name + " history - Unfinished Business",
+		History: buildDocumentHistory(chain, name, a.prefix),
 	})
 }
 

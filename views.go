@@ -23,6 +23,7 @@ type PageData struct {
 	RootPath   string
 	Current    *TaskNode
 	Summary    []*TaskNode
+	History    *DocumentHistory
 	Error      string
 }
 
@@ -78,20 +79,24 @@ func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
 			continue
 		}
 		t.counts[attachment.Name]++
-		doc := &DocumentNode{
-			Name:      attachment.Name,
-			URL:       prefix + "document?q=" + url.QueryEscape(path) + "&doc=" + url.QueryEscape(attachment.Id),
-			Size:      humanSize(attachment.Size),
-			Version:   t.counts[attachment.Name],
-			Ref:       shortRef(attachment.Blob),
-			Attached:  formatTaskTime(attachment.TimeStamp),
-			Origin:    task.Name,
-			OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
-		}
+		doc := documentNode(attachment, task, path, prefix, t.counts[attachment.Name])
 		t.current[attachment.Name] = doc
 		added = append(added, doc)
 	}
 	return added
+}
+
+func documentNode(attachment *Attachment, task *Task, path, prefix string, version int) *DocumentNode {
+	return &DocumentNode{
+		Name:      attachment.Name,
+		URL:       prefix + "document?q=" + url.QueryEscape(path) + "&doc=" + url.QueryEscape(attachment.Id),
+		Size:      humanSize(attachment.Size),
+		Version:   version,
+		Ref:       shortRef(attachment.Blob),
+		Attached:  formatTaskTime(attachment.TimeStamp),
+		Origin:    task.Name,
+		OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
+	}
 }
 
 func (t *docTrail) snapshot() []*DocumentNode {
@@ -127,6 +132,61 @@ func buildTaskNodeWithTrail(task *Task, path, prefix, next string, depth int, tr
 		node.Children = append(node.Children, buildTaskNodeWithTrail(child, joinTaskPath(path, child.Id), prefix, next, depth+1, trail.clone()))
 	}
 	return node
+}
+
+// DocumentHistory is every copy of one file name around one task: the copies
+// met on the walk from the root down to the task (the last is in effect
+// there) and the copies attached on tasks below it (each applies only to its
+// own task and the tasks under it).
+type DocumentHistory struct {
+	Name     string
+	TaskName string
+	TaskURL  string
+	Chain    []*DocumentNode
+	Below    []*DocumentNode
+}
+
+func buildDocumentHistory(chain []*Task, name, prefix string) *DocumentHistory {
+	history := &DocumentHistory{Name: name}
+	version := 0
+	path := rootPath
+	for i, task := range chain {
+		if i > 0 {
+			path = joinTaskPath(path, task.Id)
+		}
+		if task.Deleted {
+			continue
+		}
+		for _, attachment := range task.Attachments {
+			if attachment != nil && attachment.Name == name {
+				version++
+				history.Chain = append(history.Chain, documentNode(attachment, task, path, prefix, version))
+			}
+		}
+	}
+
+	target := chain[len(chain)-1]
+	history.TaskName = target.Name
+	history.TaskURL = prefix + "detailed?q=" + url.QueryEscape(path)
+
+	// Below-entries keep per-branch numbering: children inherit their
+	// parent's count, siblings count independently — same as the badges.
+	var walk func(task *Task, taskPath string, count int)
+	walk = func(task *Task, taskPath string, count int) {
+		for _, child := range visibleChildren(task) {
+			childPath := joinTaskPath(taskPath, child.Id)
+			childCount := count
+			for _, attachment := range child.Attachments {
+				if attachment != nil && attachment.Name == name {
+					childCount++
+					history.Below = append(history.Below, documentNode(attachment, child, childPath, prefix, childCount))
+				}
+			}
+			walk(child, childPath, childCount)
+		}
+	}
+	walk(target, path, version)
+	return history
 }
 
 // buildDetailNode renders the task at the end of chain with the document
@@ -252,12 +312,42 @@ const pageTemplates = `
 	<section class="panel documents">
 		<h2>Documents at &ldquo;{{.Name}}&rdquo;</h2>
 		<ul class="attachments">
+			{{$node := .}}
 			{{range .Documents}}
-			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
+			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}} · <a href="{{$node.Prefix}}documentHistory?q={{$node.Path}}&name={{.Name}}">history</a></span></li>
 			{{end}}
 		</ul>
 	</section>
 	{{end}}
+{{end}}
+
+{{define "history"}}
+{{template "header" .}}
+	<section class="panel documents">
+		<h2>&ldquo;{{.History.Name}}&rdquo; at &ldquo;{{.History.TaskName}}&rdquo;</h2>
+		<p class="meta">Copies met walking up from <a href="{{.History.TaskURL}}">{{.History.TaskName}}</a>, shown root first — the last one is in effect there.</p>
+		{{if .History.Chain}}
+		<ul class="attachments">
+			{{range .History.Chain}}
+			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
+			{{end}}
+		</ul>
+		{{else}}
+		<p class="meta">None above or at this task.</p>
+		{{end}}
+		<h2>Copies on tasks below &ldquo;{{.History.TaskName}}&rdquo;</h2>
+		<p class="meta">Each applies to its own task and everything under it; none of them affect &ldquo;{{.History.TaskName}}&rdquo;.</p>
+		{{if .History.Below}}
+		<ul class="attachments">
+			{{range .History.Below}}
+			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}}</span></li>
+			{{end}}
+		</ul>
+		{{else}}
+		<p class="meta">None.</p>
+		{{end}}
+	</section>
+{{template "footer" .}}
 {{end}}
 
 {{define "restore"}}

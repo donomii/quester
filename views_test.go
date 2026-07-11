@@ -106,6 +106,40 @@ func TestBuildDetailNodeSkipsDeletedAncestorDocuments(t *testing.T) {
 	}
 }
 
+func TestBuildDocumentHistoryChainAndBelow(t *testing.T) {
+	blob := func(digit string) string { return strings.Repeat(digit, 64) }
+	grandchild := &Task{Id: "c", Name: "C", Attachments: []*Attachment{{Id: "c1", Name: "spec.md", Blob: blob("3"), Size: 3}}}
+	childA := &Task{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "spec.md", Blob: blob("2"), Size: 2}}, SubTasks: []*Task{grandchild}}
+	childB := &Task{Id: "b", Name: "B"}
+	root := &Task{
+		Id:   rootPath,
+		Name: "root",
+		Attachments: []*Attachment{
+			{Id: "r1", Name: "spec.md", Blob: blob("1"), Size: 1},
+			{Id: "r2", Name: "notes.txt", Blob: blob("9"), Size: 9},
+		},
+		SubTasks: []*Task{childA, childB},
+	}
+
+	atA := buildDocumentHistory(FindTaskChain(rootPath+"/a", root), "spec.md", "/quester/")
+	if len(atA.Chain) != 2 || atA.Chain[0].Ref != "11111111" || atA.Chain[1].Ref != "22222222" || atA.Chain[1].Version != 2 {
+		t.Fatalf("chain at A = %#v, want root v1 then A v2", atA.Chain)
+	}
+	if len(atA.Below) != 1 || atA.Below[0].Ref != "33333333" || atA.Below[0].Version != 3 || atA.Below[0].Origin != "C" {
+		t.Fatalf("below A = %#v, want C v3", atA.Below)
+	}
+
+	atB := buildDocumentHistory(FindTaskChain(rootPath+"/b", root), "spec.md", "/quester/")
+	if len(atB.Chain) != 1 || atB.Chain[0].Ref != "11111111" || len(atB.Below) != 0 {
+		t.Fatalf("history at B = %#v, want only root v1", atB)
+	}
+
+	atRoot := buildDocumentHistory(FindTaskChain(rootPath, root), "spec.md", "/quester/")
+	if len(atRoot.Chain) != 1 || len(atRoot.Below) != 2 {
+		t.Fatalf("history at root = %#v, want v1 above and A+C below", atRoot)
+	}
+}
+
 func TestHumanSize(t *testing.T) {
 	cases := map[int64]string{
 		512:     "512 B",
