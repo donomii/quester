@@ -24,7 +24,17 @@ type PageData struct {
 	Current    *TaskNode
 	Summary    []*TaskNode
 	History    *DocumentHistory
+	Forums     []*ForumNode
+	ForumID    string
 	Error      string
+}
+
+type ForumNode struct {
+	ID          string
+	Name        string
+	Description string
+	URL         string
+	Active      bool
 }
 
 type TaskNode struct {
@@ -37,6 +47,12 @@ type TaskNode struct {
 	Created     string
 	DepthClass  string
 	Checked     bool
+	Track       bool
+	Author      string
+	AgentAuthor bool
+	ForumID     string
+	ForumName   string
+	IsRoot      bool
 	CanDelete   bool
 	Attachments []*DocumentNode
 	Documents   []*DocumentNode
@@ -47,6 +63,7 @@ type TaskNode struct {
 // attachments sharing this Name along the path from the root, so the highest
 // version at a node is the document in effect there.
 type DocumentNode struct {
+	ID        string
 	Name      string
 	URL       string
 	Size      string
@@ -55,6 +72,7 @@ type DocumentNode struct {
 	Attached  string
 	Origin    string
 	OriginURL string
+	Replaces  string
 }
 
 // docTrail accumulates document versions along a root-to-node path so the
@@ -62,14 +80,42 @@ type DocumentNode struct {
 type docTrail struct {
 	counts  map[string]int
 	current map[string]*DocumentNode
+	roots   map[string]string
+	users   map[string]*User
+	forums  map[string]*Forum
 }
 
-func newDocTrail() *docTrail {
-	return &docTrail{counts: map[string]int{}, current: map[string]*DocumentNode{}}
+func newDocTrail(roots ...*Task) *docTrail {
+	t := &docTrail{
+		counts:  map[string]int{},
+		current: map[string]*DocumentNode{},
+		roots:   map[string]string{},
+		users:   map[string]*User{},
+		forums:  map[string]*Forum{},
+	}
+	if len(roots) > 0 && roots[0] != nil {
+		for _, user := range roots[0].Users {
+			if user != nil {
+				t.users[user.Id] = user
+			}
+		}
+		for _, forum := range roots[0].Forums {
+			if forum != nil {
+				t.forums[forum.Id] = forum
+			}
+		}
+	}
+	return t
 }
 
 func (t *docTrail) clone() *docTrail {
-	return &docTrail{counts: maps.Clone(t.counts), current: maps.Clone(t.current)}
+	return &docTrail{
+		counts:  maps.Clone(t.counts),
+		current: maps.Clone(t.current),
+		roots:   maps.Clone(t.roots),
+		users:   t.users,
+		forums:  t.forums,
+	}
 }
 
 func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
@@ -78,9 +124,14 @@ func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
 		if attachment == nil {
 			continue
 		}
-		t.counts[attachment.Name]++
-		doc := documentNode(attachment, task, path, prefix, t.counts[attachment.Name])
-		t.current[attachment.Name] = doc
+		rootID := attachment.Id
+		if replacedRoot := t.roots[attachment.Replaces]; replacedRoot != "" {
+			rootID = replacedRoot
+		}
+		t.roots[attachment.Id] = rootID
+		t.counts[rootID]++
+		doc := documentNode(attachment, task, path, prefix, t.counts[rootID])
+		t.current[rootID] = doc
 		added = append(added, doc)
 	}
 	return added
@@ -88,6 +139,7 @@ func (t *docTrail) add(task *Task, path, prefix string) []*DocumentNode {
 
 func documentNode(attachment *Attachment, task *Task, path, prefix string, version int) *DocumentNode {
 	return &DocumentNode{
+		ID:        attachment.Id,
 		Name:      attachment.Name,
 		URL:       prefix + "document?q=" + url.QueryEscape(path) + "&doc=" + url.QueryEscape(attachment.Id),
 		Size:      humanSize(attachment.Size),
@@ -96,6 +148,7 @@ func documentNode(attachment *Attachment, task *Task, path, prefix string, versi
 		Attached:  formatTaskTime(attachment.TimeStamp),
 		Origin:    task.Name,
 		OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
+		Replaces:  attachment.Replaces,
 	}
 }
 
@@ -106,7 +159,7 @@ func (t *docTrail) snapshot() []*DocumentNode {
 }
 
 func buildTaskNode(task *Task, path, prefix, next string, depth int) *TaskNode {
-	return buildTaskNodeWithTrail(task, path, prefix, next, depth, newDocTrail())
+	return buildTaskNodeWithTrail(task, path, prefix, next, depth, newDocTrail(task))
 }
 
 // buildTaskNodeWithTrail renders a subtree. The trail carries document
@@ -115,29 +168,68 @@ func buildTaskNode(task *Task, path, prefix, next string, depth int) *TaskNode {
 func buildTaskNodeWithTrail(task *Task, path, prefix, next string, depth int, trail *docTrail) *TaskNode {
 	path = normalizedPath(path)
 	node := &TaskNode{
-		ID:         task.Id,
-		Prefix:     prefix,
-		Name:       task.Name,
-		Text:       task.Text,
-		Path:       path,
-		Next:       next,
-		Created:    formatTaskTime(task.TimeStamp),
-		DepthClass: oddEven(depth) + "-depth",
-		Checked:    task.Checked,
-		CanDelete:  !isRootPath(path),
+		ID:          task.Id,
+		Prefix:      prefix,
+		Name:        task.Name,
+		Text:        task.Text,
+		Path:        task.Id,
+		Next:        next,
+		Created:     formatTaskTime(task.TimeStamp),
+		DepthClass:  oddEven(depth) + "-depth",
+		Checked:     task.Checked,
+		Track:       task.Track,
+		Author:      trail.authorName(task.AuthorId),
+		AgentAuthor: trail.agentAuthor(task.AuthorId),
+		ForumID:     task.ForumId,
+		ForumName:   trail.forumName(task.ForumId),
+		IsRoot:      task.Id == rootPath,
+		CanDelete:   task.Id != rootPath,
 	}
-	node.Attachments = trail.add(task, path, prefix)
+	node.Attachments = trail.add(task, task.Id, prefix)
 	node.Documents = trail.snapshot()
 	for _, child := range visibleChildren(task) {
-		node.Children = append(node.Children, buildTaskNodeWithTrail(child, joinTaskPath(path, child.Id), prefix, next, depth+1, trail.clone()))
+		node.Children = append(node.Children, buildTaskNodeWithTrail(child, child.Id, prefix, next, depth+1, trail.clone()))
 	}
 	return node
 }
 
-// DocumentHistory is every copy of one file name around one task: the copies
-// met on the walk from the root down to the task (the last is in effect
-// there) and the copies attached on tasks below it (each applies only to its
-// own task and the tasks under it).
+func buildForumNodes(root *Task, activeID, prefix string) []*ForumNode {
+	forums := make([]*ForumNode, 0, len(root.Forums))
+	for _, forum := range root.Forums {
+		if forum == nil {
+			continue
+		}
+		forums = append(forums, &ForumNode{
+			ID:          forum.Id,
+			Name:        forum.Name,
+			Description: forum.Description,
+			URL:         prefix + "summary?forum=" + url.QueryEscape(forum.Id),
+			Active:      forum.Id == activeID,
+		})
+	}
+	return forums
+}
+
+func (t *docTrail) authorName(id string) string {
+	if user := t.users[id]; user != nil {
+		return user.Name
+	}
+	return cleanUserID(id)
+}
+
+func (t *docTrail) agentAuthor(id string) bool {
+	return t.users[id] != nil && t.users[id].IsAgent
+}
+
+func (t *docTrail) forumName(id string) string {
+	if forum := t.forums[id]; forum != nil {
+		return forum.Name
+	}
+	return cleanForumID(id)
+}
+
+// DocumentHistory follows explicit Replaces links. Chain ends at the selected
+// attachment; Below contains revisions that descend from it.
 type DocumentHistory struct {
 	Name     string
 	TaskName string
@@ -146,72 +238,108 @@ type DocumentHistory struct {
 	Below    []*DocumentNode
 }
 
-func buildDocumentHistory(chain []*Task, name, prefix string) *DocumentHistory {
-	history := &DocumentHistory{Name: name}
-	version := 0
-	path := rootPath
-	for i, task := range chain {
-		if i > 0 {
-			path = joinTaskPath(path, task.Id)
+type attachedRecord struct {
+	task       *Task
+	attachment *Attachment
+}
+
+func buildDocumentHistory(root *Task, attachmentID, prefix string) *DocumentHistory {
+	records := collectAttachmentRecords(root)
+	byID := map[string]attachedRecord{}
+	for _, record := range records {
+		byID[record.attachment.Id] = record
+	}
+	target, found := byID[attachmentID]
+	if !found {
+		return nil
+	}
+
+	var lineage []attachedRecord
+	seen := map[string]bool{}
+	current := target
+	for {
+		if seen[current.attachment.Id] {
+			return nil
 		}
-		if task.Deleted {
-			continue
+		seen[current.attachment.Id] = true
+		lineage = append([]attachedRecord{current}, lineage...)
+		if current.attachment.Replaces == "" {
+			break
+		}
+		previous, exists := byID[current.attachment.Replaces]
+		if !exists {
+			break
+		}
+		current = previous
+	}
+
+	history := &DocumentHistory{
+		Name:     target.attachment.Name,
+		TaskName: target.task.Name,
+		TaskURL:  prefix + "detailed?q=" + url.QueryEscape(target.task.Id),
+	}
+	versions := map[string]int{}
+	for index, record := range lineage {
+		version := index + 1
+		versions[record.attachment.Id] = version
+		history.Chain = append(history.Chain, documentNode(record.attachment, record.task, record.task.Id, prefix, version))
+	}
+
+	for added := true; added; {
+		added = false
+		for _, record := range records {
+			if _, exists := versions[record.attachment.Id]; exists {
+				continue
+			}
+			parentVersion, descends := versions[record.attachment.Replaces]
+			if !descends {
+				continue
+			}
+			version := parentVersion + 1
+			versions[record.attachment.Id] = version
+			history.Below = append(history.Below, documentNode(record.attachment, record.task, record.task.Id, prefix, version))
+			added = true
+		}
+	}
+	return history
+}
+
+func collectAttachmentRecords(root *Task) []attachedRecord {
+	var records []attachedRecord
+	var walk func(*Task)
+	walk = func(task *Task) {
+		if task == nil || task.Deleted {
+			return
 		}
 		for _, attachment := range task.Attachments {
-			if attachment != nil && attachment.Name == name {
-				version++
-				history.Chain = append(history.Chain, documentNode(attachment, task, path, prefix, version))
+			if attachment != nil {
+				records = append(records, attachedRecord{task: task, attachment: attachment})
 			}
 		}
-	}
-
-	target := chain[len(chain)-1]
-	history.TaskName = target.Name
-	history.TaskURL = prefix + "detailed?q=" + url.QueryEscape(path)
-
-	// Below-entries keep per-branch numbering: children inherit their
-	// parent's count, siblings count independently — same as the badges.
-	var walk func(task *Task, taskPath string, count int)
-	walk = func(task *Task, taskPath string, count int) {
-		for _, child := range visibleChildren(task) {
-			childPath := joinTaskPath(taskPath, child.Id)
-			childCount := count
-			for _, attachment := range child.Attachments {
-				if attachment != nil && attachment.Name == name {
-					childCount++
-					history.Below = append(history.Below, documentNode(attachment, child, childPath, prefix, childCount))
-				}
-			}
-			walk(child, childPath, childCount)
+		for _, child := range task.SubTasks {
+			walk(child)
 		}
 	}
-	walk(target, path, version)
-	return history
+	walk(root)
+	return records
 }
 
 // buildDetailNode renders the task at the end of chain with the document
 // state inherited from its ancestors.
 func buildDetailNode(chain []*Task, prefix, next string) *TaskNode {
-	trail := newDocTrail()
-	path := rootPath
+	trail := newDocTrail(chain[0])
 	for i, task := range chain {
-		if i > 0 {
-			path = joinTaskPath(path, task.Id)
-		}
 		if i == len(chain)-1 {
-			return buildTaskNodeWithTrail(task, path, prefix, next, 0, trail)
+			return buildTaskNodeWithTrail(task, task.Id, prefix, next, 0, trail)
 		}
 		if !task.Deleted {
-			trail.add(task, path, prefix)
+			trail.add(task, task.Id, prefix)
 		}
 	}
 	return nil
 }
 
-// shortRef abbreviates a blob reference for display, like an abbreviated git
-// hash. Version numbers are per-branch, so parallel branches can each carry a
-// "v2" of the same name; the content id is what tells them apart — and equal
-// ids mean identical bytes.
+// shortRef abbreviates a blob reference for display.
 func shortRef(ref string) string {
 	if len(ref) > 8 {
 		return ref[:8]
@@ -263,21 +391,27 @@ const pageTemplates = `
 <body>
 	<nav class="topbar">
 		<a class="brand" href="{{.Prefix}}summary">unfinished business</a>
-		<div class="nav-actions">
-			<a href="{{.Prefix}}downloadAll">Backup</a>
+			<div class="nav-actions">
+				<a href="{{.Prefix}}api/">API</a>
+				<a href="{{.Prefix}}downloadAll">Backup</a>
 			<a href="{{.Prefix}}restoreAllPage">Restore</a>
 		</div>
 	</nav>
-	<header class="masthead">
+		<header class="masthead">
 		<a class="main" href="{{.Prefix}}summary"><h1>unfinished business</h1></a>
-		<ul class="tabmenu">
-			<li {{if eq .Filter ""}}class="active"{{end}}><a href="{{.Prefix}}summary">all</a></li>
-			<li {{if eq .Filter "new"}}class="active"{{end}}><a href="{{.Prefix}}summary?filter=new">open</a></li>
-		</ul>
-	</header>
-	<section id="intro">
-		<h2>Hierarchical task tracking in a comment-thread shape.</h2>
-	</section>
+			<ul class="tabmenu">
+				<li {{if eq .Filter ""}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}">all</a></li>
+				<li {{if eq .Filter "new"}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}&filter=new">open</a></li>
+			</ul>
+		</header>
+		{{if .Forums}}
+		<nav class="forumbar" aria-label="Forums">
+			{{range .Forums}}<a {{if .Active}}class="active"{{end}} href="{{.URL}}">{{.Name}}</a>{{end}}
+		</nav>
+		{{end}}
+		<section id="intro">
+			{{range .Forums}}{{if .Active}}<h2>{{.Name}}{{if .Description}} — {{.Description}}{{end}}</h2>{{end}}{{end}}
+		</section>
 	{{if .Error}}<div class="notice">{{.Error}}</div>{{end}}
 	<main class="sr" id="links">
 {{end}}
@@ -314,7 +448,7 @@ const pageTemplates = `
 		<ul class="attachments">
 			{{$node := .}}
 			{{range .Documents}}
-			<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}} · <a href="{{$node.Prefix}}documentHistory?q={{$node.Path}}&name={{.Name}}">history</a></span></li>
+				<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}} · <a href="{{$node.Prefix}}documentHistory?q={{$node.Path}}&doc={{.ID}}">history</a></span></li>
 			{{end}}
 		</ul>
 	</section>
@@ -325,7 +459,7 @@ const pageTemplates = `
 {{template "header" .}}
 	<section class="panel documents">
 		<h2>&ldquo;{{.History.Name}}&rdquo; at &ldquo;{{.History.TaskName}}&rdquo;</h2>
-		<p class="meta">Copies met walking up from <a href="{{.History.TaskURL}}">{{.History.TaskName}}</a>, shown root first — the last one is in effect there.</p>
+		<p class="meta">Explicit revision chain ending at the selected file on <a href="{{.History.TaskURL}}">{{.History.TaskName}}</a>.</p>
 		{{if .History.Chain}}
 		<ul class="attachments">
 			{{range .History.Chain}}
@@ -335,8 +469,8 @@ const pageTemplates = `
 		{{else}}
 		<p class="meta">None above or at this task.</p>
 		{{end}}
-		<h2>Copies on tasks below &ldquo;{{.History.TaskName}}&rdquo;</h2>
-		<p class="meta">Each applies to its own task and everything under it; none of them affect &ldquo;{{.History.TaskName}}&rdquo;.</p>
+		<h2>Later revisions</h2>
+		<p class="meta">Files that explicitly replace the selected revision or one of its descendants.</p>
 		{{if .History.Below}}
 		<ul class="attachments">
 			{{range .History.Below}}
@@ -373,17 +507,19 @@ const pageTemplates = `
 {{template "footer" .}}
 {{end}}
 
-{{define "summaryItem"}}
-	<article class="link {{if .Checked}}is-checked{{end}}">
-		<form class="vote toggle-form" action="{{.Prefix}}toggle" method="post">
+	{{define "summaryItem"}}
+		<article class="link {{if .Checked}}is-checked{{end}}">
+			{{if .Track}}
+			<form class="vote toggle-form" action="{{.Prefix}}toggle" method="post">
 			<input type="hidden" name="path" value="{{.Path}}">
 			<input type="hidden" name="next" value="{{.Next}}">
-			<button type="submit" aria-label="Toggle {{.Name}}">{{if .Checked}}done{{else}}open{{end}}</button>
-		</form>
-		<div class="entry">
-			<h2><a href="{{.Prefix}}detailed?q={{.Path}}">{{.Name}}</a></h2>
-			{{if .Text}}<p class="selftext">{{.Text}}</p>{{end}}
-			<p class="meta">submitted {{.Created}} <a class="comments" href="{{.Prefix}}detailed?q={{.Path}}">{{len .Children}} comments</a>{{if .Attachments}} <span class="comments">{{len .Attachments}} attached</span>{{end}}</p>
+				<button type="submit" aria-label="Toggle {{.Name}}">{{if .Checked}}done{{else}}open{{end}}</button>
+			</form>
+			{{end}}
+			<div class="entry">
+				<h2><a href="{{.Prefix}}detailed?q={{.Path}}">{{.Name}}</a></h2>
+				{{if .Text}}<p class="selftext">{{.Text}}</p>{{end}}
+				<p class="meta">submitted by {{.Author}}{{if .AgentAuthor}} (AI){{end}} {{.Created}} <a class="comments" href="{{.Prefix}}detailed?q={{.Path}}">{{len .Children}} comments</a>{{if .Attachments}} <span class="comments">{{len .Attachments}} attached</span>{{end}}</p>
 		</div>
 	</article>
 {{end}}
@@ -391,21 +527,22 @@ const pageTemplates = `
 {{define "taskTree"}}
 	<article class="comment {{.DepthClass}} {{if .Checked}}is-checked{{end}}">
 		<details open>
-			<summary>{{.Name}}</summary>
+			<summary>{{if .Name}}{{.Name}}{{else}}reply by {{.Author}}{{end}}</summary>
 			<div class="body">
-				<form class="toggle-form" action="{{.Prefix}}toggle" method="post">
+					{{if .Track}}<form class="toggle-form" action="{{.Prefix}}toggle" method="post">
 					<input type="hidden" name="path" value="{{.Path}}">
 					<input type="hidden" name="next" value="{{.Next}}">
 					<button type="submit">{{if .Checked}}done{{else}}open{{end}}</button>
-				</form>
-				<div class="md">
-					<h2>{{.Name}}</h2>
-					{{if .Text}}<p>{{.Text}}</p>{{end}}
+					</form>{{end}}
+					<div class="md">
+						{{if .Name}}<h2>{{.Name}}</h2>{{end}}
+						{{if .Text}}<p>{{.Text}}</p>{{end}}
+						<p class="meta">{{.Author}}{{if .AgentAuthor}} (AI){{end}} · {{.Created}} · {{.ForumName}} · node {{.ID}}</p>
 				</div>
 				{{if .Attachments}}
 				<ul class="attachments">
 					{{range .Attachments}}
-					<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}}</span></li>
+						<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · <a href="{{$.Prefix}}documentHistory?q={{$.Path}}&doc={{.ID}}">history</a></span></li>
 					{{end}}
 				</ul>
 				{{end}}
@@ -434,47 +571,96 @@ const pageTemplates = `
 	</article>
 {{end}}
 
-{{define "taskForms"}}
-	<section class="forms">
-		<form action="{{.Prefix}}addWaypoint" method="post" enctype="multipart/form-data">
-			<h2>Add task under &ldquo;{{.Current.Name}}&rdquo;</h2>
-			<input type="hidden" name="q" value="{{.Current.Path}}">
-			<label for="title">Title</label>
-			<input id="title" name="title" type="text" autocomplete="off" required>
-			<label for="content">Notes</label>
-			<textarea id="content" name="content" rows="3"></textarea>
-			<label for="document">Attach</label>
-			<input id="document" name="document" type="file" multiple>
-			<button type="submit">Add</button>
-		</form>
+	{{define "taskForms"}}
+		<section class="forms">
+			<form action="{{.Prefix}}addWaypoint" method="post" enctype="multipart/form-data">
+				{{if .Current.IsRoot}}<h2>Add post</h2>{{else}}<h2>Reply to &ldquo;{{.Current.Name}}&rdquo;</h2>{{end}}
+				<input type="hidden" name="q" value="{{.Current.Path}}">
+				<input type="hidden" name="forum" value="{{.ForumID}}">
+				<label for="title">Title</label>
+				<input id="title" name="title" type="text" autocomplete="off" {{if .Current.IsRoot}}required{{end}}>
+				<p class="meta">Required for a forum post; optional for a reply.</p>
+				<label for="content">Text</label>
+				<textarea id="content" name="content" rows="3"></textarea>
+				<label for="document">Attach</label>
+				<input id="document" name="document" type="file" multiple>
+				<p class="meta">Attach files to this post or reply. The combined upload limit is 100 MB.</p>
+				{{if not .Current.IsRoot}}
+				<label><input name="track" type="checkbox"> Track as task</label>
+				<p class="meta">Adds open/done task state to this reply.</p>
+				{{end}}
+				{{if .Current.Documents}}
+				<label for="reply-replaces">Revision of</label>
+				<select id="reply-replaces" name="replaces">
+					<option value="">New document</option>
+					{{range .Current.Documents}}<option value="{{.ID}}">{{.Name}} v{{.Version}}</option>{{end}}
+				</select>
+				<p class="meta">Choose a document only when uploading exactly one file that replaces it.</p>
+				{{end}}
+				<button type="submit">{{if .Current.IsRoot}}Post{{else}}Reply{{end}}</button>
+			</form>
 
-		<form action="{{.Prefix}}attachDocument" method="post" enctype="multipart/form-data">
-			<h2>Attach documents to &ldquo;{{.Current.Name}}&rdquo;</h2>
+			<form action="{{.Prefix}}attachDocument" method="post" enctype="multipart/form-data">
+				<h2>Attach documents to &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
-			<label for="attach-document">Files</label>
-			<input id="attach-document" name="document" type="file" multiple required>
-			<button type="submit">Attach</button>
-			<p class="meta">Reusing a file name adds a new version for this task and everything under it.</p>
-		</form>
+				<label for="attach-document">Files</label>
+				<input id="attach-document" name="document" type="file" multiple required>
+				<label for="attach-replaces">Revision of</label>
+				<select id="attach-replaces" name="replaces">
+					<option value="">New document</option>
+					{{range .Current.Documents}}<option value="{{.ID}}">{{.Name}} v{{.Version}}</option>{{end}}
+				</select>
+				<button type="submit">Attach</button>
+				<p class="meta">Choose a document only when uploading exactly one file that explicitly replaces it. Filenames do not create revisions. The combined upload limit is 100 MB.</p>
+			</form>
 
 		<form action="{{.Prefix}}editWaypoint" method="post">
 			<h2>Edit &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="edit-title">Title</label>
-			<input id="edit-title" name="title" type="text" value="{{.Current.Name}}" autocomplete="off" required>
+				<input id="edit-title" name="title" type="text" value="{{.Current.Name}}" autocomplete="off">
 			<label for="edit-content">Notes</label>
 			<textarea id="edit-content" name="content" rows="3">{{.Current.Text}}</textarea>
 			<button type="submit">Update</button>
-		</form>
+			</form>
 
-		{{if .Current.CanDelete}}
-		<form action="{{.Prefix}}deleteWaypoint" method="post">
+			{{if .Current.CanDelete}}
+			<form action="{{.Prefix}}moveWaypoint" method="post">
+				<h2>Move or promote this node</h2>
+				<input type="hidden" name="q" value="{{.Current.Path}}">
+				<label for="move-forum">Forum</label>
+				<select id="move-forum" name="forum">
+					{{range .Forums}}<option value="{{.ID}}" {{if eq .ID $.Current.ForumID}}selected{{end}}>{{.Name}}</option>{{end}}
+				</select>
+				<p class="meta">Used when moving the node to the top level. Its replies move with it.</p>
+				<label for="move-title">Forum post title</label>
+				<input id="move-title" name="title" type="text" value="{{.Current.Name}}" autocomplete="off">
+				<p class="meta">Required when promoting this node to a top-level forum post.</p>
+				<label for="move-parent">Parent node id</label>
+				<input id="move-parent" name="parent" type="text" autocomplete="off">
+				<p class="meta">Leave blank to promote it to a forum post, or enter another node id to make it a reply there.</p>
+				<button type="submit">Move</button>
+			</form>
+
+			<form action="{{.Prefix}}deleteWaypoint" method="post">
 			<h2>Delete &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<button class="danger" type="submit">Delete</button>
-		</form>
-		{{end}}
-	</section>
+			</form>
+			{{end}}
+
+			{{if .Current.IsRoot}}
+			<form action="{{.Prefix}}addForum" method="post">
+				<h2>Create forum</h2>
+				<label for="forum-name">Name</label>
+				<input id="forum-name" name="name" type="text" autocomplete="off" required>
+				<label for="forum-description">Description</label>
+				<textarea id="forum-description" name="description" rows="2"></textarea>
+				<p class="meta">Forums group related private posts and their conversations.</p>
+				<button type="submit">Create forum</button>
+			</form>
+			{{end}}
+		</section>
 {{end}}
 `
 

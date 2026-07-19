@@ -10,7 +10,6 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 
 ## Data and Operations
 
-- Add a version field to the JSON task tree before future schema changes.
 - Add a one-shot migration command for older `quester/*.json` data directories.
 - Add periodic backup guidance or an export reminder for long-running installs.
 - Consider file-locking if multiple Quester processes may share the same data directory.

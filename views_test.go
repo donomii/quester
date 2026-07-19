@@ -15,10 +15,10 @@ func TestDocumentResolutionDeepestWinsPerBranch(t *testing.T) {
 		Name: "root",
 		Attachments: []*Attachment{
 			testAttachment("v1", "spec.md"),
-			testAttachment("v2", "spec.md"),
+			{Id: "v2", Name: "renamed-spec.md", Blob: strings.Repeat("b", 64), Size: 2, Replaces: "v1"},
 		},
 		SubTasks: []*Task{
-			{Id: "a", Name: "A", Attachments: []*Attachment{testAttachment("a1", "spec.md")}},
+			{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "agent-output.md", Blob: strings.Repeat("c", 64), Size: 3, Replaces: "v2"}}},
 			{Id: "b", Name: "B"},
 		},
 	}
@@ -36,11 +36,27 @@ func TestDocumentResolutionDeepestWinsPerBranch(t *testing.T) {
 		t.Fatalf("branch B documents = %#v, want 1", nodeB.Documents)
 	}
 	doc := nodeB.Documents[0]
-	if doc.Version != 2 || doc.Origin != "root" {
+	if doc.Version != 2 || doc.Origin != "root" || doc.Name != "renamed-spec.md" {
 		t.Fatalf("branch B doc = %#v, want v2 from root", doc)
 	}
 	if !strings.Contains(doc.URL, "doc=v2") || !strings.Contains(doc.URL, "q="+rootPath) {
 		t.Fatalf("branch B doc URL = %q, want link to v2 on the root task", doc.URL)
+	}
+}
+
+func TestMatchingFilenamesRemainSeparateWithoutReplacementLink(t *testing.T) {
+	root := &Task{
+		Id:   rootPath,
+		Name: "root",
+		Attachments: []*Attachment{
+			{Id: "first", Name: "ticket.pdf", Blob: strings.Repeat("1", 64), Size: 1},
+			{Id: "second", Name: "ticket.pdf", Blob: strings.Repeat("2", 64), Size: 2},
+		},
+	}
+
+	node := buildTaskNode(root, rootPath, "/quester/", "/next", 0)
+	if len(node.Documents) != 2 || node.Documents[0].Version != 1 || node.Documents[1].Version != 1 {
+		t.Fatalf("matching filenames resolved as %#v, want two independent documents", node.Documents)
 	}
 }
 
@@ -51,9 +67,9 @@ func TestParallelVersionsShowDistinctRefs(t *testing.T) {
 		Name:        "root",
 		Attachments: []*Attachment{{Id: "v1", Name: "spec.md", Blob: blob("1"), Size: 1}},
 		SubTasks: []*Task{
-			{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "spec.md", Blob: blob("2"), Size: 2}}},
-			{Id: "b", Name: "B", Attachments: []*Attachment{{Id: "b1", Name: "spec.md", Blob: blob("3"), Size: 3}}},
-			{Id: "c", Name: "C", Attachments: []*Attachment{{Id: "c1", Name: "spec.md", Blob: blob("2"), Size: 2}}},
+			{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "a.md", Blob: blob("2"), Size: 2, Replaces: "v1"}}},
+			{Id: "b", Name: "B", Attachments: []*Attachment{{Id: "b1", Name: "b.md", Blob: blob("3"), Size: 3, Replaces: "v1"}}},
+			{Id: "c", Name: "C", Attachments: []*Attachment{{Id: "c1", Name: "c.md", Blob: blob("2"), Size: 2, Replaces: "v1"}}},
 		},
 	}
 
@@ -108,8 +124,8 @@ func TestBuildDetailNodeSkipsDeletedAncestorDocuments(t *testing.T) {
 
 func TestBuildDocumentHistoryChainAndBelow(t *testing.T) {
 	blob := func(digit string) string { return strings.Repeat(digit, 64) }
-	grandchild := &Task{Id: "c", Name: "C", Attachments: []*Attachment{{Id: "c1", Name: "spec.md", Blob: blob("3"), Size: 3}}}
-	childA := &Task{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "spec.md", Blob: blob("2"), Size: 2}}, SubTasks: []*Task{grandchild}}
+	grandchild := &Task{Id: "c", Name: "C", Attachments: []*Attachment{{Id: "c1", Name: "final.md", Blob: blob("3"), Size: 3, Replaces: "a1"}}}
+	childA := &Task{Id: "a", Name: "A", Attachments: []*Attachment{{Id: "a1", Name: "draft.md", Blob: blob("2"), Size: 2, Replaces: "r1"}}, SubTasks: []*Task{grandchild}}
 	childB := &Task{Id: "b", Name: "B"}
 	root := &Task{
 		Id:   rootPath,
@@ -121,7 +137,7 @@ func TestBuildDocumentHistoryChainAndBelow(t *testing.T) {
 		SubTasks: []*Task{childA, childB},
 	}
 
-	atA := buildDocumentHistory(FindTaskChain(rootPath+"/a", root), "spec.md", "/quester/")
+	atA := buildDocumentHistory(root, "a1", "/quester/")
 	if len(atA.Chain) != 2 || atA.Chain[0].Ref != "11111111" || atA.Chain[1].Ref != "22222222" || atA.Chain[1].Version != 2 {
 		t.Fatalf("chain at A = %#v, want root v1 then A v2", atA.Chain)
 	}
@@ -129,12 +145,12 @@ func TestBuildDocumentHistoryChainAndBelow(t *testing.T) {
 		t.Fatalf("below A = %#v, want C v3", atA.Below)
 	}
 
-	atB := buildDocumentHistory(FindTaskChain(rootPath+"/b", root), "spec.md", "/quester/")
-	if len(atB.Chain) != 1 || atB.Chain[0].Ref != "11111111" || len(atB.Below) != 0 {
-		t.Fatalf("history at B = %#v, want only root v1", atB)
+	atB := buildDocumentHistory(root, "r2", "/quester/")
+	if len(atB.Chain) != 1 || atB.Chain[0].Ref != "99999999" || len(atB.Below) != 0 {
+		t.Fatalf("history for independent document = %#v, want only notes", atB)
 	}
 
-	atRoot := buildDocumentHistory(FindTaskChain(rootPath, root), "spec.md", "/quester/")
+	atRoot := buildDocumentHistory(root, "r1", "/quester/")
 	if len(atRoot.Chain) != 1 || len(atRoot.Below) != 2 {
 		t.Fatalf("history at root = %#v, want v1 above and A+C below", atRoot)
 	}

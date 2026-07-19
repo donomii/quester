@@ -66,4 +66,32 @@ func TestNormalizeTreeFillsMissingFields(t *testing.T) {
 	if root.SubTasks[0].Name != "Untitled task" {
 		t.Fatalf("subtask name = %q, want Untitled task", root.SubTasks[0].Name)
 	}
+	if root.Schema != currentSchema || len(root.Forums) != 1 || root.SubTasks[0].ForumId != defaultForumID {
+		t.Fatalf("normalized forum metadata = schema %d forums %#v child forum %q", root.Schema, root.Forums, root.SubTasks[0].ForumId)
+	}
+	if !root.SubTasks[0].Track {
+		t.Fatal("legacy task did not retain task status")
+	}
+}
+
+func TestMoveTaskPreservesNodeAndSubtree(t *testing.T) {
+	child := &Task{Id: "child", Name: "Child", ForumId: defaultForumID}
+	node := &Task{Id: "node", Name: "Node", ForumId: defaultForumID, SubTasks: []*Task{child}}
+	root := normalizeTree(&Task{
+		Id:       rootPath,
+		Schema:   currentSchema,
+		Forums:   []*Forum{defaultForum(), {Id: "trips", Name: "Trips"}},
+		Users:    []*User{defaultUser()},
+		SubTasks: []*Task{node},
+	})
+
+	if err := moveTask(root, node.Id, "", "trips", "Node"); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindTask(node.Id, root); got != node || got.ForumId != "trips" || !got.Track || got.SubTasks[0] != child || child.ForumId != "trips" {
+		t.Fatalf("moved node = %#v child = %#v", got, child)
+	}
+	if err := moveTask(root, node.Id, child.Id, defaultForumID, ""); err == nil {
+		t.Fatal("moving a node beneath its own child succeeded")
+	}
 }

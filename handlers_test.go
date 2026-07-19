@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -423,7 +424,16 @@ func TestDocumentHistoryPage(t *testing.T) {
 	}
 	replyRef := root.SubTasks[0].SubTasks[0].Attachments[0].Blob[:8]
 
-	resp := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path)+"&name=spec.md", nil)
+	baseID := root.SubTasks[0].Attachments[0].Id
+	replyID := root.SubTasks[0].SubTasks[0].Attachments[0].Id
+	root.SubTasks[0].SubTasks[0].Attachments[0].Replaces = baseID
+	if err := app.store.Update(defaultUserID, func(stored *Task) error {
+		stored.SubTasks[0].SubTasks[0].Attachments[0].Replaces = baseID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path)+"&doc="+url.QueryEscape(baseID), nil)
 	body := readBody(t, resp)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -432,20 +442,153 @@ func TestDocumentHistoryPage(t *testing.T) {
 	if !strings.Contains(body, baseRef) || !strings.Contains(body, replyRef) {
 		t.Fatalf("history missing refs %s/%s: %s", baseRef, replyRef, body)
 	}
-	if !strings.Contains(body, "Copies on tasks below") {
+	if !strings.Contains(body, "Later revisions") || !strings.Contains(body, replyID) {
 		t.Fatalf("history missing below section: %s", body)
 	}
 
-	noName := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path), nil)
-	noName.Body.Close()
-	if noName.StatusCode != http.StatusBadRequest {
-		t.Fatalf("history without name = %d, want 400", noName.StatusCode)
+	noDocument := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(path), nil)
+	noDocument.Body.Close()
+	if noDocument.StatusCode != http.StatusBadRequest {
+		t.Fatalf("history without document = %d, want 400", noDocument.StatusCode)
 	}
 
-	badTask := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(rootPath+"/missing")+"&name=spec.md", nil)
+	badTask := performRequest(router, http.MethodGet, "/quester/documentHistory?q="+url.QueryEscape(rootPath+"/missing")+"&doc="+url.QueryEscape(baseID), nil)
 	badTask.Body.Close()
 	if badTask.StatusCode != http.StatusNotFound {
 		t.Fatalf("history for missing task = %d, want 404", badTask.StatusCode)
+	}
+}
+
+func TestForumAndAgentAPIFlow(t *testing.T) {
+	app, router := newTestApp(t)
+
+	forumResponse := performJSONRequest(router, http.MethodPost, "/quester/api/forums", `{"name":"Trips","description":"Private travel planning"}`, nil)
+	if forumResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create forum status = %d body = %s", forumResponse.StatusCode, readBody(t, forumResponse))
+	}
+	var forum Forum
+	if err := json.NewDecoder(forumResponse.Body).Decode(&forum); err != nil {
+		t.Fatal(err)
+	}
+	forumResponse.Body.Close()
+
+	postResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes", `{"forum_id":"`+forum.Id+`","title":"Japan","body":"@trip-agent plan the trip"}`, map[string]string{
+		"X-Quester-User": "planner",
+		"X-Quester-Name": "Planner",
+	})
+	if postResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create post status = %d body = %s", postResponse.StatusCode, readBody(t, postResponse))
+	}
+	var post apiNode
+	if err := json.NewDecoder(postResponse.Body).Decode(&post); err != nil {
+		t.Fatal(err)
+	}
+	postResponse.Body.Close()
+
+	replyResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes", `{"parent_id":"`+post.ID+`","body":"I found a later flight."}`, map[string]string{
+		"X-Quester-User":  "trip-agent",
+		"X-Quester-Name":  "Trip agent",
+		"X-Quester-Agent": "true",
+	})
+	if replyResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create reply status = %d body = %s", replyResponse.StatusCode, readBody(t, replyResponse))
+	}
+	var reply apiNode
+	if err := json.NewDecoder(replyResponse.Body).Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	replyResponse.Body.Close()
+	if reply.ForumID != forum.Id || reply.ParentID != post.ID || reply.AuthorID != "trip-agent" || reply.Status != "" {
+		t.Fatalf("agent reply = %#v", reply)
+	}
+
+	moveResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes/"+reply.ID+"/move", `{"forum_id":"general","title":"Flight option"}`, nil)
+	if moveResponse.StatusCode != http.StatusOK {
+		t.Fatalf("promote reply status = %d body = %s", moveResponse.StatusCode, readBody(t, moveResponse))
+	}
+	moveResponse.Body.Close()
+
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := FindTask(reply.ID, root)
+	if moved == nil || moved.ForumId != defaultForumID || findParent(root, moved) != root {
+		t.Fatalf("promoted node = %#v", moved)
+	}
+	agent := findUser(root, "trip-agent")
+	if agent == nil || !agent.IsAgent || agent.Name != "Trip agent" {
+		t.Fatalf("agent user = %#v", agent)
+	}
+	mentions := performRequest(router, http.MethodGet, "/quester/api/mentions/trip-agent", nil)
+	if mentions.StatusCode != http.StatusOK {
+		t.Fatalf("mentions status = %d body = %s", mentions.StatusCode, readBody(t, mentions))
+	}
+	var mentionedNodes []apiNode
+	if err := json.NewDecoder(mentions.Body).Decode(&mentionedNodes); err != nil {
+		t.Fatal(err)
+	}
+	mentions.Body.Close()
+	if len(mentionedNodes) != 1 || mentionedNodes[0].ID != post.ID {
+		t.Fatalf("mentions = %#v", mentionedNodes)
+	}
+
+	detail := performRequest(router, http.MethodGet, "/quester/detailed?q="+reply.ID, nil)
+	detailBody := readBody(t, detail)
+	detail.Body.Close()
+	if detail.StatusCode != http.StatusOK {
+		t.Fatalf("stable node detail status = %d", detail.StatusCode)
+	}
+	if !strings.Contains(detailBody, "Trip agent") || !strings.Contains(detailBody, "Flight option") {
+		t.Fatalf("promoted node detail missing author or title: %s", detailBody)
+	}
+
+	trips := performRequest(router, http.MethodGet, "/quester/summary?forum="+forum.Id, nil)
+	tripsBody := readBody(t, trips)
+	trips.Body.Close()
+	if trips.StatusCode != http.StatusOK || !strings.Contains(tripsBody, "Japan") || strings.Contains(tripsBody, "Flight option") {
+		t.Fatalf("trips forum status = %d body = %s", trips.StatusCode, tripsBody)
+	}
+
+	index := performRequest(router, http.MethodGet, "/quester/api/", nil)
+	indexBody := readBody(t, index)
+	index.Body.Close()
+	if index.StatusCode != http.StatusOK || !strings.Contains(indexBody, "X-Quester-User") || !strings.Contains(indexBody, "api/mentions") {
+		t.Fatalf("API index status = %d body = %s", index.StatusCode, indexBody)
+	}
+}
+
+func TestAPIAttachmentRevisionUsesExplicitLink(t *testing.T) {
+	app, router := newTestApp(t)
+	postForm(t, router, "/quester/addWaypoint", url.Values{"q": {rootPath}, "forum": {defaultForumID}, "title": {"Documents"}}).Body.Close()
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := root.SubTasks[0].Id
+
+	first := postMultipart(t, router, "/quester/api/nodes/"+nodeID+"/attachments", nil, []testUpload{{"document", "ticket.pdf", "first"}})
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first attachment status = %d body = %s", first.StatusCode, readBody(t, first))
+	}
+	var firstNode apiNode
+	if err := json.NewDecoder(first.Body).Decode(&firstNode); err != nil {
+		t.Fatal(err)
+	}
+	first.Body.Close()
+	firstID := firstNode.Attachments[0].ID
+
+	second := postMultipart(t, router, "/quester/api/nodes/"+nodeID+"/attachments", url.Values{"replaces": {firstID}}, []testUpload{{"document", "boarding-pass.pdf", "second"}})
+	if second.StatusCode != http.StatusCreated {
+		t.Fatalf("revision attachment status = %d body = %s", second.StatusCode, readBody(t, second))
+	}
+	var secondNode apiNode
+	if err := json.NewDecoder(second.Body).Decode(&secondNode); err != nil {
+		t.Fatal(err)
+	}
+	second.Body.Close()
+	if got := secondNode.Attachments[1].Replaces; got != firstID {
+		t.Fatalf("replacement link = %q, want %q", got, firstID)
 	}
 }
 
@@ -490,6 +633,17 @@ func performRequest(router http.Handler, method, target string, body io.Reader, 
 	req := httptest.NewRequest(method, target, body)
 	if len(contentType) > 0 {
 		req.Header.Set("Content-Type", contentType[0])
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+func performJSONRequest(router http.Handler, method, target, body string, headers map[string]string) *http.Response {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
