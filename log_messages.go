@@ -8,6 +8,12 @@ func logListening(addr, prefix string) { log.Printf("quester listening on http:/
 
 func logMutationFailed(err error) { log.Printf("mutation failed: %v", err) }
 
+func logBackupFailed(err error) { log.Printf("backup failed: %v", err) }
+
+func logBackupSkippedBlob(ref string, err error) { log.Printf("backup skipped blob %s: %v", ref, err) }
+
+func logCleanupFailed(err error) { log.Printf("cleanup failed: %v", err) }
+
 func logRenderFailed(templateName string, err error) {
 	log.Printf("render %s failed: %v", templateName, err)
 }

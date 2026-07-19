@@ -15,18 +15,25 @@ import (
 var styleCSS string
 
 type PageData struct {
-	Style      template.CSS
-	Prefix     string
-	CurrentURL string
-	Title      string
-	Filter     string
-	RootPath   string
-	Current    *TaskNode
-	Summary    []*TaskNode
-	History    *DocumentHistory
-	Forums     []*ForumNode
-	ForumID    string
-	Error      string
+	Style        template.CSS
+	Prefix       string
+	CurrentURL   string
+	Title        string
+	Filter       string
+	Sort         string
+	RootPath     string
+	CSRF         string
+	Query        string
+	Current      *TaskNode
+	Summary      []*TaskNode
+	Results      []*TaskNode
+	DeletedTasks []*TaskNode
+	History      *DocumentHistory
+	Garbage      []*BlobNode
+	Forums       []*ForumNode
+	ForumID      string
+	Notice       string
+	Error        string
 }
 
 type ForumNode struct {
@@ -44,6 +51,7 @@ type TaskNode struct {
 	Text        string
 	Path        string
 	Next        string
+	CSRF        string
 	Created     string
 	DepthClass  string
 	Checked     bool
@@ -57,6 +65,104 @@ type TaskNode struct {
 	Attachments []*DocumentNode
 	Documents   []*DocumentNode
 	Children    []*TaskNode
+}
+
+// stampCSRF spreads the per-request form token over a rendered subtree; the
+// token is minted at render time, after the nodes are built.
+func stampCSRF(node *TaskNode, token string) {
+	if node == nil {
+		return
+	}
+	node.CSRF = token
+	for _, child := range node.Children {
+		stampCSRF(child, token)
+	}
+}
+
+// BlobNode is one stored blob file prepared for the cleanup listing.
+type BlobNode struct {
+	Ref    string
+	Short  string
+	Size   string
+	Stored string
+}
+
+func buildBlobNodes(blobs []BlobInfo) []*BlobNode {
+	nodes := make([]*BlobNode, 0, len(blobs))
+	for _, blob := range blobs {
+		nodes = append(nodes, &BlobNode{
+			Ref:    blob.Ref,
+			Short:  shortRef(blob.Ref),
+			Size:   humanSize(blob.Size),
+			Stored: formatTaskTime(blob.ModTime),
+		})
+	}
+	return nodes
+}
+
+// buildSearchResults flattens every visible node whose title or notes
+// contain the query, case-insensitively, in tree order.
+func buildSearchResults(root *Task, query, prefix, next string) []*TaskNode {
+	needle := strings.ToLower(query)
+	trail := newDocTrail(root)
+	var results []*TaskNode
+	var walk func(*Task)
+	walk = func(parent *Task) {
+		for _, task := range visibleChildren(parent) {
+			if taskMatches(task, needle) {
+				results = append(results, &TaskNode{
+					ID:          task.Id,
+					Prefix:      prefix,
+					Name:        task.Name,
+					Text:        task.Text,
+					Path:        task.Id,
+					Next:        next,
+					Created:     formatTaskTime(task.TimeStamp),
+					Checked:     task.Checked,
+					Track:       task.Track,
+					Author:      trail.authorName(task.AuthorId),
+					AgentAuthor: trail.agentAuthor(task.AuthorId),
+					ForumID:     task.ForumId,
+					ForumName:   trail.forumName(task.ForumId),
+				})
+			}
+			walk(task)
+		}
+	}
+	walk(root)
+	return results
+}
+
+func buildDeletedTaskNodes(root *Task, prefix string) []*TaskNode {
+	trail := newDocTrail(root)
+	var nodes []*TaskNode
+	var walk func(*Task)
+	walk = func(parent *Task) {
+		for _, task := range parent.SubTasks {
+			if task == nil {
+				continue
+			}
+			if task.Deleted {
+				nodes = append(nodes, &TaskNode{
+					ID:          task.Id,
+					Prefix:      prefix,
+					Name:        task.Name,
+					Text:        task.Text,
+					Path:        task.Id,
+					Created:     formatTaskTime(task.TimeStamp),
+					Checked:     task.Checked,
+					Track:       task.Track,
+					Author:      trail.authorName(task.AuthorId),
+					AgentAuthor: trail.agentAuthor(task.AuthorId),
+					ForumID:     task.ForumId,
+					ForumName:   trail.forumName(task.ForumId),
+				})
+			}
+			walk(task)
+		}
+	}
+	walk(root)
+	return nodes
 }
 
 // DocumentNode is one attachment prepared for rendering. Version counts the
@@ -392,6 +498,9 @@ const pageTemplates = `
 	<nav class="topbar">
 		<a class="brand" href="{{.Prefix}}summary">unfinished business</a>
 			<div class="nav-actions">
+				<a href="{{.Prefix}}search">Search</a>
+				<a href="{{.Prefix}}deleted">Deleted</a>
+				<a href="{{.Prefix}}cleanupPage">Cleanup</a>
 				<a href="{{.Prefix}}api/">API</a>
 				<a href="{{.Prefix}}downloadAll">Backup</a>
 			<a href="{{.Prefix}}restoreAllPage">Restore</a>
@@ -400,8 +509,8 @@ const pageTemplates = `
 		<header class="masthead">
 		<a class="main" href="{{.Prefix}}summary"><h1>unfinished business</h1></a>
 			<ul class="tabmenu">
-				<li {{if eq .Filter ""}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}">all</a></li>
-				<li {{if eq .Filter "new"}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}&filter=new">open</a></li>
+				<li {{if eq .Filter ""}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}&sort={{.Sort}}">all</a></li>
+				<li {{if eq .Filter "new"}}class="active"{{end}}><a href="{{.Prefix}}summary?forum={{.ForumID}}&filter=new&sort={{.Sort}}">open</a></li>
 			</ul>
 		</header>
 		{{if .Forums}}
@@ -424,6 +533,18 @@ const pageTemplates = `
 
 {{define "summary"}}
 {{template "header" .}}
+	<form class="sort-form" action="{{.Prefix}}summary" method="get">
+		<input type="hidden" name="forum" value="{{.ForumID}}">
+		<input type="hidden" name="filter" value="{{.Filter}}">
+		<label for="sort">Sort tasks</label>
+		<select id="sort" name="sort">
+			<option value="created" {{if eq .Sort "created"}}selected{{end}}>Created time</option>
+			<option value="completion" {{if eq .Sort "completion"}}selected{{end}}>Completion</option>
+			<option value="title" {{if eq .Sort "title"}}selected{{end}}>Title</option>
+		</select>
+		<button type="submit">Sort</button>
+		<p class="meta">Created time shows newest first; completion shows open tasks first; title sorts alphabetically.</p>
+	</form>
 	{{if .Summary}}
 		{{range .Summary}}{{template "summaryItem" .}}{{end}}
 	{{else}}
@@ -490,10 +611,61 @@ const pageTemplates = `
 		<h2>Restore from backup</h2>
 		<p>Restoring replaces the current task tree for this user.</p>
 		<form action="{{.Prefix}}restoreAll" method="post" enctype="multipart/form-data">
-			<label for="content">Backup JSON</label>
-			<input type="file" id="content" name="content" accept="application/json,.json" required>
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
+			<label for="content">Backup file</label>
+			<input type="file" id="content" name="content" accept="application/zip,.zip,application/json,.json" required>
+			<p class="meta">Choose a self-contained Quester zip backup or a legacy tasks.json file.</p>
 			<button type="submit">Restore</button>
 		</form>
+	</section>
+{{template "footer" .}}
+{{end}}
+
+{{define "search"}}
+{{template "header" .}}
+	<section class="panel">
+		<h2>Search tasks</h2>
+		<form action="{{.Prefix}}search" method="get">
+			<label for="query">Title or notes</label>
+			<input id="query" name="q" type="text" value="{{.Query}}" autocomplete="off">
+			<button type="submit">Search</button>
+		</form>
+	</section>
+	{{range .Results}}{{template "summaryItem" .}}{{else}}{{if .Query}}<p class="empty">No matching tasks.</p>{{end}}{{end}}
+{{template "footer" .}}
+{{end}}
+
+{{define "deleted"}}
+{{template "header" .}}
+	<section class="panel">
+		<h2>Deleted tasks</h2>
+		<p>Restoring a task makes it and its replies visible again. A task beneath a deleted parent remains hidden until that parent is also restored.</p>
+		{{range .DeletedTasks}}
+		<form action="{{.Prefix}}restoreWaypoint" method="post">
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
+			<input type="hidden" name="q" value="{{.Path}}">
+			<p><strong>{{if .Name}}{{.Name}}{{else}}Untitled reply{{end}}</strong> <span class="meta">{{.Created}} · {{.ForumName}} · node {{.ID}}</span></p>
+			{{if .Text}}<p>{{.Text}}</p>{{end}}
+			<button type="submit">Restore</button>
+		</form>
+		{{else}}<p class="empty">No deleted tasks.</p>{{end}}
+	</section>
+{{template "footer" .}}
+{{end}}
+
+{{define "cleanup"}}
+{{template "header" .}}
+	<section class="panel">
+		<h2>Unreferenced attachment files</h2>
+		{{if .Notice}}<p class="notice">{{.Notice}}</p>{{end}}
+		{{if .Garbage}}
+		<ul class="attachments">{{range .Garbage}}<li>{{.Short}} · {{.Size}} · stored {{.Stored}}</li>{{end}}</ul>
+		<form action="{{.Prefix}}cleanup" method="post">
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
+			<p>Cleanup permanently deletes the listed files. Files stored within the last hour are excluded so an upload can finish linking them to a task.</p>
+			<button class="danger" type="submit">Delete listed files</button>
+		</form>
+		{{else}}<p>No unreferenced attachment files older than one hour.</p>{{end}}
 	</section>
 {{template "footer" .}}
 {{end}}
@@ -511,6 +683,7 @@ const pageTemplates = `
 		<article class="link {{if .Checked}}is-checked{{end}}">
 			{{if .Track}}
 			<form class="vote toggle-form" action="{{.Prefix}}toggle" method="post">
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
 			<input type="hidden" name="path" value="{{.Path}}">
 			<input type="hidden" name="next" value="{{.Next}}">
 				<button type="submit" aria-label="Toggle {{.Name}}">{{if .Checked}}done{{else}}open{{end}}</button>
@@ -530,6 +703,7 @@ const pageTemplates = `
 			<summary>{{if .Name}}{{.Name}}{{else}}reply by {{.Author}}{{end}}</summary>
 			<div class="body">
 					{{if .Track}}<form class="toggle-form" action="{{.Prefix}}toggle" method="post">
+					<input type="hidden" name="csrf" value="{{.CSRF}}">
 					<input type="hidden" name="path" value="{{.Path}}">
 					<input type="hidden" name="next" value="{{.Next}}">
 					<button type="submit">{{if .Checked}}done{{else}}open{{end}}</button>
@@ -560,6 +734,7 @@ const pageTemplates = `
 					<a href="{{.Prefix}}detailed?q={{.Path}}">Open</a>
 					{{if .CanDelete}}
 					<form class="inline-form" action="{{.Prefix}}deleteWaypoint" method="post">
+						<input type="hidden" name="csrf" value="{{.CSRF}}">
 						<input type="hidden" name="q" value="{{.Path}}">
 						<button type="submit">Delete</button>
 					</form>
@@ -574,6 +749,7 @@ const pageTemplates = `
 	{{define "taskForms"}}
 		<section class="forms">
 			<form action="{{.Prefix}}addWaypoint" method="post" enctype="multipart/form-data">
+				<input type="hidden" name="csrf" value="{{.CSRF}}">
 				{{if .Current.IsRoot}}<h2>Add post</h2>{{else}}<h2>Reply to &ldquo;{{.Current.Name}}&rdquo;</h2>{{end}}
 				<input type="hidden" name="q" value="{{.Current.Path}}">
 				<input type="hidden" name="forum" value="{{.ForumID}}">
@@ -601,6 +777,7 @@ const pageTemplates = `
 			</form>
 
 			<form action="{{.Prefix}}attachDocument" method="post" enctype="multipart/form-data">
+				<input type="hidden" name="csrf" value="{{.CSRF}}">
 				<h2>Attach documents to &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 				<label for="attach-document">Files</label>
@@ -615,6 +792,7 @@ const pageTemplates = `
 			</form>
 
 		<form action="{{.Prefix}}editWaypoint" method="post">
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
 			<h2>Edit &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<label for="edit-title">Title</label>
@@ -626,6 +804,7 @@ const pageTemplates = `
 
 			{{if .Current.CanDelete}}
 			<form action="{{.Prefix}}moveWaypoint" method="post">
+				<input type="hidden" name="csrf" value="{{.CSRF}}">
 				<h2>Move or promote this node</h2>
 				<input type="hidden" name="q" value="{{.Current.Path}}">
 				<label for="move-forum">Forum</label>
@@ -643,6 +822,7 @@ const pageTemplates = `
 			</form>
 
 			<form action="{{.Prefix}}deleteWaypoint" method="post">
+			<input type="hidden" name="csrf" value="{{.CSRF}}">
 			<h2>Delete &ldquo;{{.Current.Name}}&rdquo;</h2>
 			<input type="hidden" name="q" value="{{.Current.Path}}">
 			<button class="danger" type="submit">Delete</button>
@@ -651,6 +831,7 @@ const pageTemplates = `
 
 			{{if .Current.IsRoot}}
 			<form action="{{.Prefix}}addForum" method="post">
+				<input type="hidden" name="csrf" value="{{.CSRF}}">
 				<h2>Create forum</h2>
 				<label for="forum-name">Name</label>
 				<input id="forum-name" name="name" type="text" autocomplete="off" required>

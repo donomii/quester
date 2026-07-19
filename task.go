@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -436,6 +437,29 @@ func removeChild(parent, target *Task) bool {
 	return false
 }
 
+// collectBlobRefs records every blob referenced by any attachment in the
+// tree, including attachments on soft-deleted nodes: those records survive in
+// the JSON, so their content must survive with them.
+func collectBlobRefs(task *Task, refs map[string]bool) {
+	if task == nil {
+		return
+	}
+	for _, attachment := range task.Attachments {
+		if attachment != nil && isBlobRef(attachment.Blob) {
+			refs[attachment.Blob] = true
+		}
+	}
+	for _, child := range task.SubTasks {
+		collectBlobRefs(child, refs)
+	}
+}
+
+// taskMatches reports whether the lower-cased needle occurs in the task's
+// title or notes.
+func taskMatches(task *Task, loweredNeedle string) bool {
+	return strings.Contains(strings.ToLower(task.Name+"\n"+task.Text), loweredNeedle)
+}
+
 func findAttachment(root *Task, id string) (*Task, *Attachment) {
 	if root == nil || strings.TrimSpace(id) == "" {
 		return nil, nil
@@ -553,4 +577,32 @@ func visibleChildren(task *Task) []*Task {
 		children = append(children, child)
 	}
 	return children
+}
+
+func normalizeTaskSort(value string) string {
+	switch value {
+	case "completion", "title":
+		return value
+	default:
+		return "created"
+	}
+}
+
+func sortTasks(tasks []*Task, sortBy string) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		left, right := tasks[i], tasks[j]
+		switch sortBy {
+		case "completion":
+			if left.Checked != right.Checked {
+				return !left.Checked
+			}
+		case "title":
+			leftTitle := strings.ToLower(left.Name)
+			rightTitle := strings.ToLower(right.Name)
+			if leftTitle != rightTitle {
+				return leftTitle < rightTitle
+			}
+		}
+		return left.TimeStamp.After(right.TimeStamp)
+	})
 }

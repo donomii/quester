@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -70,13 +72,16 @@ func TestMutationsUsePostAndBadPathsDoNotPanic(t *testing.T) {
 
 func TestMutationRejectsCrossOriginPost(t *testing.T) {
 	app, router := newTestApp(t)
+	token, cookie := csrfCredentials(t, router)
 	form := url.Values{
 		"q":     {rootPath},
 		"title": {"Blocked"},
+		"csrf":  {token},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/quester/addWaypoint", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://example.invalid")
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	resp := rec.Result()
@@ -94,15 +99,53 @@ func TestMutationRejectsCrossOriginPost(t *testing.T) {
 	}
 }
 
+func TestTrustedProxyRequiresAuthenticatedIdentity(t *testing.T) {
+	app, router := newTestApp(t)
+	trusted, err := parseTrustedProxies("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.trustedProxies = trusted
+
+	missingIdentity := httptest.NewRequest(http.MethodGet, "/quester/summary", nil)
+	missingIdentity.RemoteAddr = "127.0.0.1:12345"
+	missingRecorder := httptest.NewRecorder()
+	router.ServeHTTP(missingRecorder, missingIdentity)
+	if missingRecorder.Code != http.StatusForbidden {
+		t.Fatalf("missing proxy identity status = %d, want 403", missingRecorder.Code)
+	}
+
+	authenticated := httptest.NewRequest(http.MethodGet, "/quester/summary", nil)
+	authenticated.RemoteAddr = "127.0.0.1:12345"
+	authenticated.Header.Set("authentigate-id", "jer")
+	authenticatedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(authenticatedRecorder, authenticated)
+	if authenticatedRecorder.Code != http.StatusOK {
+		t.Fatalf("authenticated proxy status = %d, want 200", authenticatedRecorder.Code)
+	}
+
+	untrusted := httptest.NewRequest(http.MethodGet, "/quester/summary", nil)
+	untrusted.RemoteAddr = "192.0.2.1:12345"
+	untrusted.Header.Set("authentigate-id", "jer")
+	untrustedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(untrustedRecorder, untrusted)
+	if untrustedRecorder.Code != http.StatusForbidden {
+		t.Fatalf("untrusted proxy status = %d, want 403", untrustedRecorder.Code)
+	}
+}
+
 func TestMutationAllowsSameOriginPost(t *testing.T) {
 	app, router := newTestApp(t)
+	token, cookie := csrfCredentials(t, router)
 	form := url.Values{
 		"q":     {rootPath},
 		"title": {"Allowed"},
+		"csrf":  {token},
 	}
 	req := httptest.NewRequest(http.MethodPost, "http://quester.local/quester/addWaypoint", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "http://quester.local")
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	resp := rec.Result()
@@ -155,6 +198,74 @@ func TestAddToggleDeleteFlow(t *testing.T) {
 	}
 }
 
+func TestSummarySortOptions(t *testing.T) {
+	app, router := newTestApp(t)
+	times := []time.Time{
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
+	}
+	err := app.store.Update(defaultUserID, func(root *Task) error {
+		root.SubTasks = []*Task{
+			{Id: "zulu", Name: "Zulu", ForumId: defaultForumID, AuthorId: defaultUserID, Track: true, Checked: true, TimeStamp: times[0]},
+			{Id: "alpha", Name: "Alpha", ForumId: defaultForumID, AuthorId: defaultUserID, Track: true, TimeStamp: times[1]},
+			{Id: "beta", Name: "Beta", ForumId: defaultForumID, AuthorId: defaultUserID, Track: true, TimeStamp: times[2]},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertOrder := func(target string, names ...string) {
+		t.Helper()
+		resp := performRequest(router, http.MethodGet, target, nil)
+		body := readBody(t, resp)
+		resp.Body.Close()
+		previous := -1
+		for _, name := range names {
+			index := strings.Index(body, ">"+name+"</a>")
+			if index < 0 || index <= previous {
+				t.Fatalf("%s did not order %v: %s", target, names, body)
+			}
+			previous = index
+		}
+	}
+	assertOrder("/quester/summary?sort=created", "Beta", "Alpha", "Zulu")
+	assertOrder("/quester/summary?sort=completion", "Beta", "Alpha", "Zulu")
+	assertOrder("/quester/summary?sort=title", "Alpha", "Beta", "Zulu")
+}
+
+func TestDeletedTaskCanBeRestored(t *testing.T) {
+	app, router := newTestApp(t)
+	postForm(t, router, "/quester/addWaypoint", url.Values{"q": {rootPath}, "title": {"Recover me"}}).Body.Close()
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := root.SubTasks[0].Id
+	postForm(t, router, "/quester/deleteWaypoint", url.Values{"q": {id}}).Body.Close()
+
+	deleted := performRequest(router, http.MethodGet, "/quester/deleted", nil)
+	deletedBody := readBody(t, deleted)
+	deleted.Body.Close()
+	if deleted.StatusCode != http.StatusOK || !strings.Contains(deletedBody, "Recover me") {
+		t.Fatalf("deleted view status = %d body = %s", deleted.StatusCode, deletedBody)
+	}
+	restored := postForm(t, router, "/quester/restoreWaypoint", url.Values{"q": {id}})
+	restored.Body.Close()
+	if restored.StatusCode != http.StatusSeeOther || restored.Header.Get("Location") != "/quester/deleted" {
+		t.Fatalf("restore status = %d location = %q", restored.StatusCode, restored.Header.Get("Location"))
+	}
+	root, err = app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task := FindTask(id, root); task == nil || task.Deleted {
+		t.Fatalf("restored task = %#v", task)
+	}
+}
+
 func TestEditDownloadAndRestoreFlow(t *testing.T) {
 	app, router := newTestApp(t)
 	postForm(t, router, "/quester/addWaypoint", url.Values{
@@ -179,20 +290,47 @@ func TestEditDownloadAndRestoreFlow(t *testing.T) {
 	}
 
 	download := performRequest(router, http.MethodGet, "/quester/downloadAll", nil)
-	downloadBody := readBody(t, download)
+	downloadBody, err := io.ReadAll(download.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	download.Body.Close()
 	if download.StatusCode != http.StatusOK {
-		t.Fatalf("download status = %d, body = %s", download.StatusCode, downloadBody)
+		t.Fatalf("download status = %d, body = %s", download.StatusCode, string(downloadBody))
 	}
-	if got := download.Header.Get("Content-Disposition"); got != `attachment; filename="tasks.json"` {
+	if got := download.Header.Get("Content-Disposition"); got != `attachment; filename="quester-backup.zip"` {
 		t.Fatalf("Content-Disposition = %q", got)
 	}
-	if !strings.Contains(downloadBody, `"Name": "Updated"`) || !strings.Contains(downloadBody, `"Text": "Edited notes"`) {
-		t.Fatalf("download did not include edited task: %s", downloadBody)
+	archive, err := zip.NewReader(bytes.NewReader(downloadBody), int64(len(downloadBody)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasksJSON string
+	for _, entry := range archive.File {
+		if entry.Name != "tasks.json" {
+			continue
+		}
+		file, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasksJSON = string(data)
+	}
+	if !strings.Contains(tasksJSON, `"Name": "Updated"`) || !strings.Contains(tasksJSON, `"Text": "Edited notes"`) {
+		t.Fatalf("backup did not include edited task in tasks.json: %s", tasksJSON)
 	}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	token, cookie := csrfCredentials(t, router)
+	if err := writer.WriteField("csrf", token); err != nil {
+		t.Fatal(err)
+	}
 	part, err := writer.CreateFormFile("content", "tasks.json")
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +344,7 @@ func TestEditDownloadAndRestoreFlow(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/quester/restoreAll", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	restore := rec.Result()
@@ -602,6 +741,10 @@ func postMultipart(t *testing.T, router http.Handler, target string, fields url.
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	token, cookie := csrfCredentials(t, router)
+	if err := writer.WriteField("csrf", token); err != nil {
+		t.Fatal(err)
+	}
 	for key, values := range fields {
 		for _, value := range values {
 			if err := writer.WriteField(key, value); err != nil {
@@ -621,12 +764,46 @@ func postMultipart(t *testing.T, router http.Handler, target string, fields url.
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return performRequest(router, http.MethodPost, target, &body, writer.FormDataContentType())
+	req := httptest.NewRequest(http.MethodPost, target, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec.Result()
 }
 
 func postForm(t *testing.T, router http.Handler, target string, form url.Values) *http.Response {
 	t.Helper()
-	return performRequest(router, http.MethodPost, target, strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	token, cookie := csrfCredentials(t, router)
+	form.Set("csrf", token)
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+func csrfCredentials(t *testing.T, router http.Handler) (string, *http.Cookie) {
+	t.Helper()
+	resp := performRequest(router, http.MethodGet, "/quester/summary", nil)
+	body := readBody(t, resp)
+	cookies := resp.Cookies()
+	resp.Body.Close()
+	if len(cookies) == 0 {
+		t.Fatal("summary did not set the CSRF cookie")
+	}
+	marker := `name="csrf" value="`
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatal("summary did not include a CSRF form token")
+	}
+	start += len(marker)
+	end := strings.Index(body[start:], `"`)
+	if end < 0 {
+		t.Fatal("summary CSRF form token was not terminated")
+	}
+	return body[start : start+end], cookies[0]
 }
 
 func performRequest(router http.Handler, method, target string, body io.Reader, contentType ...string) *http.Response {

@@ -1,15 +1,21 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"maps"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +25,7 @@ import (
 const (
 	maxRestoreBytes    = 10 << 20
 	maxAttachmentBytes = 100 << 20
+	blobGCMinAge       = time.Hour
 )
 
 var (
@@ -31,10 +38,11 @@ var (
 )
 
 type App struct {
-	store     *Store
-	base      string
-	prefix    string
-	templates *template.Template
+	store          *Store
+	base           string
+	prefix         string
+	templates      *template.Template
+	trustedProxies []*net.IPNet
 }
 
 func NewApp(store *Store, prefix string) *App {
@@ -57,6 +65,7 @@ func normalizeRoutePrefix(prefix string) (base string, normalized string) {
 
 func (a *App) Register(router *gin.Engine) {
 	router.MaxMultipartMemory = maxRestoreBytes + (1 << 20)
+	router.Use(a.proxyGate)
 	if a.base == "" {
 		router.GET("/", a.redirectHome)
 	} else {
@@ -66,9 +75,13 @@ func (a *App) Register(router *gin.Engine) {
 		router.GET(a.prefix, a.redirectHome)
 	}
 	router.GET(a.prefix+"summary", a.authed(a.summary))
+	router.GET(a.prefix+"search", a.authed(a.search))
+	router.GET(a.prefix+"deleted", a.authed(a.deleted))
 	router.GET(a.prefix+"downloadAll", a.authed(a.downloadAll))
 	router.GET(a.prefix+"restoreAllPage", a.authed(a.restoreAllDisplay))
-	router.POST(a.prefix+"restoreAll", a.mutating(a.restoreAll))
+	router.POST(a.prefix+"restoreAll", a.formMutation(a.restoreAll, 0))
+	router.GET(a.prefix+"cleanupPage", a.authed(a.cleanupDisplay))
+	router.POST(a.prefix+"cleanup", a.mutating(a.cleanupRun))
 	router.GET(a.prefix+"detailed", a.authed(a.detailed))
 	router.GET(a.prefix+"document", a.authed(a.document))
 	router.GET(a.prefix+"documentHistory", a.authed(a.documentHistory))
@@ -76,6 +89,7 @@ func (a *App) Register(router *gin.Engine) {
 	router.POST(a.prefix+"addForum", a.mutating(a.addForum))
 	router.POST(a.prefix+"addWaypoint", a.mutating(a.addWaypoint))
 	router.POST(a.prefix+"deleteWaypoint", a.mutating(a.deleteWaypoint))
+	router.POST(a.prefix+"restoreWaypoint", a.mutating(a.restoreWaypoint))
 	router.POST(a.prefix+"editWaypoint", a.mutating(a.editWaypoint))
 	router.POST(a.prefix+"moveWaypoint", a.mutating(a.moveWaypoint))
 	router.POST(a.prefix+"toggle", a.mutating(a.toggle))
@@ -88,6 +102,14 @@ func (a *App) authed(handler authedHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.Request.Header.Get("authentigate-id")
 		if strings.TrimSpace(userID) == "" {
+			if len(a.trustedProxies) > 0 {
+				if a.isAPIRequest(c) {
+					apiError(c, http.StatusForbidden, "trusted proxy did not provide authentigate-id")
+				} else {
+					a.renderError(c, http.StatusForbidden, "The trusted proxy did not provide an authenticated user identity.")
+				}
+				return
+			}
 			userID = defaultUserID
 		}
 		handler(c, userID)
@@ -102,6 +124,14 @@ func requestActor(c *gin.Context) (id, name string, isAgent bool) {
 }
 
 func (a *App) mutating(handler authedHandler) gin.HandlerFunc {
+	return a.formMutation(handler, maxAttachmentBytes+(1<<20))
+}
+
+// formMutation guards an HTML form post: the browser origin must match, and
+// the form must carry a CSRF token minted for this browser's cookie. A
+// sizeCap of 0 skips the multipart body limit; restore uploads may carry
+// every blob of a backup and are only bounded by disk.
+func (a *App) formMutation(handler authedHandler, sizeCap int64) gin.HandlerFunc {
 	authed := a.authed(handler)
 	return func(c *gin.Context) {
 		if !a.validMutationOrigin(c) {
@@ -109,7 +139,18 @@ func (a *App) mutating(handler authedHandler) gin.HandlerFunc {
 			return
 		}
 		if strings.HasPrefix(c.ContentType(), "multipart/") {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAttachmentBytes+(1<<20))
+			if sizeCap > 0 {
+				c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, sizeCap)
+			}
+			if _, err := c.MultipartForm(); err != nil {
+				status, message := attachmentError(err)
+				a.renderError(c, status, message)
+				return
+			}
+		}
+		if !a.validCSRFToken(c) {
+			a.renderError(c, http.StatusForbidden, "The form's security token is missing or invalid. Reload the page and try again.")
+			return
 		}
 		authed(c)
 	}
@@ -145,12 +186,15 @@ func (a *App) summary(c *gin.Context, userID string) {
 		return
 	}
 	filter := c.Query("filter")
+	sortBy := normalizeTaskSort(c.Query("sort"))
 	next := c.Request.URL.RequestURI()
 	current := buildTaskNode(root, rootPath, a.prefix, next, 0)
 	rootTrail := newDocTrail(root)
 	rootTrail.add(root, rootPath, a.prefix)
 	summary := make([]*TaskNode, 0, len(root.SubTasks))
-	for _, child := range visibleChildren(root) {
+	children := visibleChildren(root)
+	sortTasks(children, sortBy)
+	for _, child := range children {
 		if child.ForumId != forumID {
 			continue
 		}
@@ -163,6 +207,7 @@ func (a *App) summary(c *gin.Context, userID string) {
 	a.render(c, http.StatusOK, "summary", PageData{
 		Title:   forum.Name + " - Unfinished Business",
 		Filter:  filter,
+		Sort:    sortBy,
 		Current: current,
 		Summary: summary,
 		Forums:  buildForumNodes(root, forumID, a.prefix),
@@ -407,6 +452,9 @@ func (a *App) attachDocument(c *gin.Context, userID string) {
 	c.Redirect(http.StatusSeeOther, a.detailURL(path))
 }
 
+// downloadAll streams a self-contained zip backup: the task tree as
+// tasks.json plus every blob any attachment record references, so restoring
+// the archive brings file content back with it.
 func (a *App) downloadAll(c *gin.Context, userID string) {
 	root, err := a.store.Load(userID)
 	if err != nil {
@@ -420,8 +468,51 @@ func (a *App) downloadAll(c *gin.Context, userID string) {
 		return
 	}
 
-	c.Header("Content-Disposition", `attachment; filename="tasks.json"`)
-	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+	c.Header("Content-Disposition", `attachment; filename="quester-backup.zip"`)
+	c.Header("Content-Type", "application/zip")
+	c.Status(http.StatusOK)
+
+	archive := zip.NewWriter(c.Writer)
+	entry, err := archive.Create("tasks.json")
+	if err == nil {
+		_, err = entry.Write(payload)
+	}
+	if err != nil {
+		logBackupFailed(err)
+		return
+	}
+	refs := map[string]bool{}
+	collectBlobRefs(root, refs)
+	for _, ref := range slices.Sorted(maps.Keys(refs)) {
+		if err := a.addBlobEntry(archive, ref); err != nil {
+			logBackupFailed(err)
+			return
+		}
+	}
+	if err := archive.Close(); err != nil {
+		logBackupFailed(err)
+	}
+}
+
+// addBlobEntry copies one blob into the backup. A blob whose file is already
+// missing is skipped with a log line: its record still travels in tasks.json
+// and the rest of the backup is worth more than aborting mid-stream.
+func (a *App) addBlobEntry(archive *zip.Writer, ref string) error {
+	file, _, err := a.store.OpenBlob(ref)
+	if errors.Is(err, os.ErrNotExist) {
+		logBackupSkippedBlob(ref, err)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	entry, err := archive.Create(blobDirName + "/" + ref)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(entry, file)
+	return err
 }
 
 func (a *App) restoreAllDisplay(c *gin.Context, userID string) {
@@ -437,21 +528,12 @@ func (a *App) restoreAllDisplay(c *gin.Context, userID string) {
 	})
 }
 
+// restoreAll accepts a quester-backup.zip (tasks plus blob content) or a
+// legacy tasks.json backup.
 func (a *App) restoreAll(c *gin.Context, userID string) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRestoreBytes+(1<<20))
-
 	fileHeader, err := c.FormFile("content")
 	if err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) {
-			a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
-			return
-		}
-		a.renderError(c, http.StatusBadRequest, "Choose a backup JSON file to restore.")
-		return
-	}
-	if fileHeader.Size > maxRestoreBytes {
-		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+		a.renderError(c, http.StatusBadRequest, "Choose a backup file to restore.")
 		return
 	}
 
@@ -462,6 +544,19 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 	}
 	defer file.Close()
 
+	if isZipUpload(file) {
+		if err := a.store.RestoreArchive(userID, file, fileHeader.Size); err != nil {
+			a.renderError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		c.Redirect(http.StatusSeeOther, a.prefix+"summary")
+		return
+	}
+
+	if fileHeader.Size > maxRestoreBytes {
+		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+		return
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maxRestoreBytes+1))
 	if err != nil {
 		a.renderError(c, http.StatusBadRequest, "Could not read the backup file.")
@@ -471,12 +566,19 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
 		return
 	}
-
 	if err := a.store.Restore(userID, data); err != nil {
 		a.renderError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	c.Redirect(http.StatusSeeOther, a.prefix+"summary")
+}
+
+func isZipUpload(file io.ReaderAt) bool {
+	var signature [4]byte
+	if _, err := file.ReadAt(signature[:], 0); err != nil {
+		return false
+	}
+	return string(signature[:]) == "PK\x03\x04"
 }
 
 func (a *App) addWaypoint(c *gin.Context, userID string) {
@@ -597,6 +699,24 @@ func (a *App) deleteWaypoint(c *gin.Context, userID string) {
 	c.Redirect(http.StatusSeeOther, a.detailURL(parent))
 }
 
+func (a *App) restoreWaypoint(c *gin.Context, userID string) {
+	id := strings.TrimSpace(c.PostForm("q"))
+	err := a.store.Update(userID, func(root *Task) error {
+		task := FindTask(id, root)
+		if task == nil || task == root || !task.Deleted {
+			return errTaskNotFound
+		}
+		task.Deleted = false
+		task.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	c.Redirect(http.StatusSeeOther, a.prefix+"deleted")
+}
+
 func (a *App) editWaypoint(c *gin.Context, userID string) {
 	path := normalizedPath(c.PostForm("q"))
 	title := c.PostForm("title")
@@ -643,6 +763,84 @@ func (a *App) toggle(c *gin.Context, userID string) {
 		return
 	}
 	a.redirectBack(c, a.detailURL(path))
+}
+
+func (a *App) search(c *gin.Context, userID string) {
+	query := strings.TrimSpace(c.Query("q"))
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load tasks.")
+		return
+	}
+	var results []*TaskNode
+	if query != "" {
+		results = buildSearchResults(root, query, a.prefix, c.Request.URL.RequestURI())
+	}
+	a.render(c, http.StatusOK, "search", PageData{
+		Title:   "Search - Unfinished Business",
+		Query:   query,
+		Results: results,
+		Forums:  buildForumNodes(root, "", a.prefix),
+	})
+}
+
+func (a *App) deleted(c *gin.Context, userID string) {
+	root, err := a.store.Load(userID)
+	if err != nil {
+		a.renderError(c, http.StatusInternalServerError, "Could not load deleted tasks.")
+		return
+	}
+	a.render(c, http.StatusOK, "deleted", PageData{
+		Title:        "Deleted tasks - Unfinished Business",
+		DeletedTasks: buildDeletedTaskNodes(root, a.prefix),
+		Forums:       buildForumNodes(root, "", a.prefix),
+	})
+}
+
+// cleanupDisplay is the dry run: it lists the unreferenced blob files that a
+// cleanup would delete, without touching anything.
+func (a *App) cleanupDisplay(c *gin.Context, _ string) {
+	garbage, err := a.store.UnreferencedBlobs(blobGCMinAge)
+	if err != nil {
+		logCleanupFailed(err)
+		a.renderError(c, http.StatusInternalServerError, "Could not scan blob storage.")
+		return
+	}
+	a.render(c, http.StatusOK, "cleanup", PageData{
+		Title:   "Cleanup - Unfinished Business",
+		Notice:  cleanupNotice(c.Query("deleted"), c.Query("reclaimed")),
+		Garbage: buildBlobNodes(garbage),
+	})
+}
+
+func cleanupNotice(deleted, reclaimed string) string {
+	count, err := strconv.Atoi(deleted)
+	if err != nil || count < 0 {
+		return ""
+	}
+	size, err := strconv.ParseInt(reclaimed, 10, 64)
+	if err != nil || size < 0 {
+		size = 0
+	}
+	noun := "files"
+	if count == 1 {
+		noun = "file"
+	}
+	return fmt.Sprintf("Deleted %d unreferenced %s (%s).", count, noun, humanSize(size))
+}
+
+func (a *App) cleanupRun(c *gin.Context, _ string) {
+	deleted, err := a.store.DeleteUnreferencedBlobs(blobGCMinAge)
+	if err != nil {
+		logCleanupFailed(err)
+		a.renderError(c, http.StatusInternalServerError, "Could not delete unreferenced files.")
+		return
+	}
+	var reclaimed int64
+	for _, blob := range deleted {
+		reclaimed += blob.Size
+	}
+	c.Redirect(http.StatusSeeOther, fmt.Sprintf("%scleanupPage?deleted=%d&reclaimed=%d", a.prefix, len(deleted), reclaimed))
 }
 
 func (a *App) handleMutationError(c *gin.Context, err error) {
@@ -700,6 +898,17 @@ func (a *App) render(c *gin.Context, status int, templateName string, data PageD
 	}
 	if data.Current == nil {
 		data.Current = buildTaskNode(defaultRoot(), rootPath, a.prefix, data.CurrentURL, 0)
+	}
+	data.CSRF = a.ensureCSRFToken(c)
+	stampCSRF(data.Current, data.CSRF)
+	for _, node := range data.Summary {
+		stampCSRF(node, data.CSRF)
+	}
+	for _, node := range data.Results {
+		stampCSRF(node, data.CSRF)
+	}
+	for _, node := range data.DeletedTasks {
+		stampCSRF(node, data.CSRF)
 	}
 
 	c.Status(status)

@@ -4,8 +4,8 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 
 ## Security and Deployment
 
-- Add real authentication or fail-closed proxy integration before binding to anything other than loopback.
-- Add per-request CSRF tokens if the app is ever served beyond a trusted local origin.
+- [x] Require a configured trusted authenticating proxy before binding beyond loopback.
+- [x] Protect form mutations with per-request CSRF tokens bound to a same-site browser cookie.
 - Document a reverse-proxy deployment example with TLS, allowed hosts, and trusted proxy settings.
 
 ## Data and Operations
@@ -13,15 +13,15 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 - Add a one-shot migration command for older `quester/*.json` data directories.
 - Add periodic backup guidance or an export reminder for long-running installs.
 - Consider file-locking if multiple Quester processes may share the same data directory.
-- Make backups self-contained: include `blobs/` content in downloadAll/restoreAll (zip archive).
-- Add garbage collection for blob files no longer referenced by any attachment record.
+- [x] Make backups self-contained: include `blobs/` content in downloadAll/restoreAll (zip archive).
+- [x] Add garbage collection for blob files no longer referenced by any attachment record.
 
 ## Product
 
-- Add search across task titles and notes.
-- Add sort options for created time, completion state, and title.
+- [x] Add search across task titles and notes.
+- [x] Add sort options for created time, completion state, and title.
 - Add due dates, priorities, or tags if the task model needs more structure.
-- Add an undo or restore view for soft-deleted tasks.
+- [x] Add a restore view for soft-deleted tasks.
 - Add inline previews for image attachments on the detail page.
 - Add bulk actions for checking, deleting, or exporting selected tasks.
 

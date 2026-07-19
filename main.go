@@ -12,11 +12,13 @@ func main() {
 	addr := envOrDefault("QUESTER_ADDR", "127.0.0.1:93")
 	dataDir := envOrDefault("QUESTER_DATA_DIR", ".quester-data")
 	prefix := envOrDefault("QUESTER_PREFIX", "/quester/")
+	trustedProxySpec := envOrDefault("QUESTER_TRUSTED_PROXIES", "")
 	testMode := false
 
 	flag.StringVar(&addr, "addr", addr, "address to listen on")
 	flag.StringVar(&dataDir, "data-dir", dataDir, "directory for task JSON files")
 	flag.StringVar(&prefix, "prefix", prefix, "URL prefix to serve from")
+	flag.StringVar(&trustedProxySpec, "trusted-proxies", trustedProxySpec, "comma-separated proxy IP addresses or CIDR blocks allowed to authenticate users; required for non-loopback addresses")
 	flag.BoolVar(&testMode, "test", false, "run an in-process model and template check, then exit")
 	flag.Parse()
 	if testMode {
@@ -36,7 +38,16 @@ func main() {
 		fatalError(err)
 	}
 
+	trustedProxies, err := parseTrustedProxies(trustedProxySpec)
+	if err != nil {
+		fatalError(err)
+	}
+	if !isLoopbackAddr(addr) && len(trustedProxies) == 0 {
+		fatalError(fmt.Errorf("address %q is not loopback; configure -trusted-proxies so only an authenticating reverse proxy can reach Quester", addr))
+	}
+
 	app := NewApp(store, prefix)
+	app.trustedProxies = trustedProxies
 	router := gin.Default()
 	if err := router.SetTrustedProxies(nil); err != nil {
 		fatalError(err)

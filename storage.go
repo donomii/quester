@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 const blobDirName = "blobs"
@@ -60,6 +64,72 @@ func (s *Store) Restore(userID string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.saveUnlocked(safeUserID(userID), normalizeTree(&root))
+}
+
+// RestoreArchive restores a zip backup produced by downloadAll: blob content
+// lands in the blob store first, then tasks.json replaces the user's tree.
+// Every blob entry must hash to its content-address name, so a corrupted
+// archive fails before any attachment record can point at wrong bytes.
+func (s *Store) RestoreArchive(userID string, archive io.ReaderAt, size int64) error {
+	reader, err := zip.NewReader(archive, size)
+	if err != nil {
+		return fmt.Errorf("backup is not a readable zip archive: %w", err)
+	}
+	var tasksJSON []byte
+	for _, entry := range reader.File {
+		name := path.Clean(entry.Name)
+		switch {
+		case name == "tasks.json":
+			tasksJSON, err = readArchiveEntry(entry, maxRestoreBytes)
+			if err != nil {
+				return err
+			}
+		case strings.HasPrefix(name, blobDirName+"/"):
+			if err := s.restoreArchiveBlob(entry); err != nil {
+				return err
+			}
+		}
+	}
+	if tasksJSON == nil {
+		return errors.New("backup archive does not contain tasks.json")
+	}
+	return s.Restore(userID, tasksJSON)
+}
+
+func readArchiveEntry(entry *zip.File, limit int64) ([]byte, error) {
+	file, err := entry.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open backup entry %s: %w", entry.Name, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read backup entry %s: %w", entry.Name, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("backup entry %s exceeds the %d byte limit", entry.Name, limit)
+	}
+	return data, nil
+}
+
+func (s *Store) restoreArchiveBlob(entry *zip.File) error {
+	ref := path.Base(path.Clean(entry.Name))
+	if !isBlobRef(ref) {
+		return fmt.Errorf("backup blob %q does not have a content-address name", entry.Name)
+	}
+	file, err := entry.Open()
+	if err != nil {
+		return fmt.Errorf("open backup blob %s: %w", entry.Name, err)
+	}
+	defer file.Close()
+	stored, _, err := s.SaveBlob(file)
+	if err != nil {
+		return fmt.Errorf("restore backup blob %s: %w", entry.Name, err)
+	}
+	if stored != ref {
+		return fmt.Errorf("backup blob %s content hashes to %s; the archive is corrupt", ref, stored)
+	}
+	return nil
 }
 
 func (s *Store) loadUnlocked(fileID string) (*Task, error) {
@@ -174,11 +244,107 @@ func (s *Store) blobPath(ref string) string {
 	return filepath.Join(s.dir, blobDirName, ref)
 }
 
+// BlobInfo describes one stored blob file for backup and cleanup listings.
+type BlobInfo struct {
+	Ref     string
+	Size    int64
+	ModTime time.Time
+}
+
+// UnreferencedBlobs lists blob files that no attachment record in any stored
+// task tree references. Blobs newer than minAge are never reported: an upload
+// stores its blob before the attachment record lands, so a fresh blob may be
+// referenced a moment later.
+func (s *Store) UnreferencedBlobs(minAge time.Duration) ([]BlobInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unreferencedBlobsLocked(minAge)
+}
+
+// DeleteUnreferencedBlobs removes what UnreferencedBlobs reports, recomputed
+// under the store lock so a reference written in between is honored.
+func (s *Store) DeleteUnreferencedBlobs(minAge time.Duration) ([]BlobInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	garbage, err := s.unreferencedBlobsLocked(minAge)
+	if err != nil {
+		return nil, err
+	}
+	for _, blob := range garbage {
+		if err := os.Remove(s.blobPath(blob.Ref)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("delete blob %s: %w", blob.Ref, err)
+		}
+	}
+	return garbage, nil
+}
+
+func (s *Store) unreferencedBlobsLocked(minAge time.Duration) ([]BlobInfo, error) {
+	referenced, err := s.referencedBlobRefsLocked()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(s.dir, blobDirName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read blob directory: %w", err)
+	}
+	cutoff := time.Now().Add(-minAge)
+	var garbage []BlobInfo
+	for _, entry := range entries {
+		if !isBlobRef(entry.Name()) || referenced[entry.Name()] {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("stat blob %s: %w", entry.Name(), err)
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		garbage = append(garbage, BlobInfo{Ref: entry.Name(), Size: info.Size(), ModTime: info.ModTime()})
+	}
+	slices.SortFunc(garbage, func(a, b BlobInfo) int { return strings.Compare(a.Ref, b.Ref) })
+	return garbage, nil
+}
+
+// referencedBlobRefsLocked walks every stored task tree, including soft
+// deleted nodes. A tree that fails to load aborts the sweep: references that
+// cannot be read must never make their blobs look deletable.
+func (s *Store) referencedBlobRefsLocked() (map[string]bool, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("read data directory: %w", err)
+	}
+	referenced := map[string]bool{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		root, err := s.loadUnlocked(strings.TrimSuffix(name, ".json"))
+		if err != nil {
+			return nil, fmt.Errorf("task file %s: %w", name, err)
+		}
+		collectBlobRefs(root, referenced)
+	}
+	return referenced, nil
+}
+
 func isBlobRef(ref string) bool {
-	if len(ref) != sha256.Size*2 {
+	return isHexToken(ref, sha256.Size*2)
+}
+
+// isHexToken reports whether value is exactly length lower-case hex digits.
+func isHexToken(value string, length int) bool {
+	if len(value) != length {
 		return false
 	}
-	for _, r := range ref {
+	for _, r := range value {
 		switch {
 		case r >= '0' && r <= '9':
 		case r >= 'a' && r <= 'f':
