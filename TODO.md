@@ -6,7 +6,7 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 
 - [x] Require a configured trusted authenticating proxy before binding beyond loopback.
 - [x] Protect form mutations with per-request CSRF tokens bound to a same-site browser cookie.
-- Document a reverse-proxy deployment example with TLS, allowed hosts, and trusted proxy settings.
+- [x] Document a reverse-proxy deployment example with TLS, allowed hosts, and trusted proxy settings in `DEPLOYMENT.md`.
 
 ## Data and Operations
 
