@@ -29,6 +29,9 @@ type apiNode struct {
 	Title       string          `json:"title,omitempty"`
 	Body        string          `json:"body,omitempty"`
 	Status      string          `json:"status,omitempty"`
+	DueDate     string          `json:"due_date,omitempty"`
+	Priority    string          `json:"priority"`
+	Tags        []string        `json:"tags,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 	Deleted     bool            `json:"deleted"`
@@ -37,11 +40,14 @@ type apiNode struct {
 }
 
 type apiCreateNodeRequest struct {
-	ForumID  string `json:"forum_id"`
-	ParentID string `json:"parent_id"`
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	Track    bool   `json:"track"`
+	ForumID  string   `json:"forum_id"`
+	ParentID string   `json:"parent_id"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body"`
+	Track    bool     `json:"track"`
+	DueDate  string   `json:"due_date"`
+	Priority string   `json:"priority"`
+	Tags     []string `json:"tags"`
 }
 
 type apiStatusRequest struct {
@@ -103,7 +109,7 @@ func (a *App) apiIndex(c *gin.Context, userID string) {
 			"GET api/nodes/{node-id}",
 			"GET api/changes?since={RFC3339 timestamp}",
 			"GET api/mentions/{user-id}?since={RFC3339 timestamp}",
-			"POST api/nodes with JSON forum_id, parent_id, title, body, and track",
+			"POST api/nodes with JSON forum_id, parent_id, title, body, track, optional due_date (YYYY-MM-DD), priority (low, normal, high, or urgent), and tags",
 			"POST api/nodes/{node-id}/status with JSON status: open, done, or none",
 			"POST api/nodes/{node-id}/move with JSON forum_id, parent_id, and title",
 			"POST api/nodes/{node-id}/attachments as multipart document files with optional replaces attachment id; combined limit 100 MB",
@@ -302,6 +308,10 @@ func (a *App) apiCreateNode(c *gin.Context, userID string) {
 	if parentID == "" {
 		node.Name = cleanTitle(node.Name)
 	}
+	if err := setTaskMetadataTags(node, request.DueDate, request.Priority, request.Tags); err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	err := a.store.Update(userID, func(root *Task) error {
 		parent := root
@@ -445,6 +455,9 @@ func (a *App) apiNode(node *Task, parentID string, includeReplies bool) apiNode 
 		Title:     node.Name,
 		Body:      node.Text,
 		Status:    status,
+		DueDate:   node.DueDate,
+		Priority:  normalizePriority(node.Priority),
+		Tags:      append([]string(nil), node.Tags...),
 		CreatedAt: node.TimeStamp,
 		UpdatedAt: node.UpdatedAt,
 		Deleted:   node.Deleted,

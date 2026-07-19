@@ -57,3 +57,9 @@ QUESTER_TRUSTED_PROXIES=127.0.0.1
 `QUESTER_TRUSTED_PROXIES` accepts comma-separated IP addresses or CIDR blocks. Keep the list as narrow as the deployment allows. A request from another source is rejected, and a request through a trusted proxy is rejected when `authentigate-id` is absent.
 
 After changing the configuration, verify that the configured hostname returns Quester after authentication, an unlisted hostname is rejected, direct access to the Quester port is unavailable from another machine, and a form submission succeeds with the issued CSRF cookie and token.
+
+## Backups
+
+Download the self-contained backup from `/quester/downloadAll` on a regular schedule appropriate to the rate of change. The zip contains the task tree and every referenced attachment blob. Copy each backup to storage outside the Quester host, retain several dated copies, and periodically restore one into an unused data directory to verify that it is readable. Quester's summary page keeps the backup link and reminder visible to the authenticated user.
+
+Quester serializes access by processes sharing one data directory. This prevents overlapping writes but does not replace backups, and running multiple servers against the same files does not provide replication or failover.

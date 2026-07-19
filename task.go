@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -11,10 +12,13 @@ import (
 )
 
 const (
-	defaultUserID  = "personalusermode"
-	defaultForumID = "general"
-	currentSchema  = 1
-	rootPath       = "ca15fd43dfaeb80eb8c125735e0479b0"
+	defaultUserID   = "personalusermode"
+	defaultForumID  = "general"
+	currentSchema   = 2
+	rootPath        = "ca15fd43dfaeb80eb8c125735e0479b0"
+	defaultPriority = "normal"
+	maxTags         = 20
+	maxTagLength    = 40
 )
 
 type Forum struct {
@@ -42,6 +46,9 @@ type Node struct {
 	Track       bool
 	Checked     bool
 	Deleted     bool
+	DueDate     string   `json:",omitempty"`
+	Priority    string   `json:",omitempty"`
+	Tags        []string `json:",omitempty"`
 	Attachments []*Attachment
 	SubTasks    []*Node
 	Schema      int      `json:",omitempty"`
@@ -106,6 +113,7 @@ func newTask(name, text, forumID, authorID string, track bool) *Task {
 		ForumId:   cleanForumID(forumID),
 		AuthorId:  cleanUserID(authorID),
 		Track:     track,
+		Priority:  defaultPriority,
 	}
 }
 
@@ -263,9 +271,135 @@ func normalizeChildren(task *Task, inheritedForum string, legacy bool) {
 		if legacy {
 			child.Track = true
 		}
+		child.DueDate = strings.TrimSpace(child.DueDate)
+		child.Priority = normalizePriority(child.Priority)
+		child.Tags = normalizeTags(child.Tags)
 		normalizeAttachments(child)
 		normalizeChildren(child, child.ForumId, legacy)
 	}
+}
+
+func normalizePriority(priority string) string {
+	priority = strings.ToLower(strings.TrimSpace(priority))
+	if priority == "" {
+		return defaultPriority
+	}
+	return priority
+}
+
+func validPriority(priority string) bool {
+	switch priority {
+	case "low", defaultPriority, "high", "urgent":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeTags(tags []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		key := strings.ToLower(tag)
+		if tag == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, tag)
+	}
+	return normalized
+}
+
+func parseTaskMetadata(dueDate, priority, tagList string) (string, string, []string, error) {
+	return parseTaskMetadataTags(dueDate, priority, strings.Split(tagList, ","))
+}
+
+func parseTaskMetadataTags(dueDate, priority string, inputTags []string) (string, string, []string, error) {
+	dueDate = strings.TrimSpace(dueDate)
+	if dueDate != "" {
+		parsed, err := time.Parse("2006-01-02", dueDate)
+		if err != nil || parsed.Format("2006-01-02") != dueDate {
+			return "", "", nil, fmt.Errorf("due date must use YYYY-MM-DD, received %q", dueDate)
+		}
+	}
+	priority = normalizePriority(priority)
+	if !validPriority(priority) {
+		return "", "", nil, fmt.Errorf("priority must be low, normal, high, or urgent, received %q", priority)
+	}
+	for _, tag := range inputTags {
+		if strings.Contains(tag, ",") {
+			return "", "", nil, fmt.Errorf("tag %q contains a comma", tag)
+		}
+	}
+	tags := normalizeTags(inputTags)
+	if len(tags) > maxTags {
+		return "", "", nil, fmt.Errorf("tags contain %d entries; the maximum is %d", len(tags), maxTags)
+	}
+	for _, tag := range tags {
+		if len([]rune(tag)) > maxTagLength {
+			return "", "", nil, fmt.Errorf("tag %q is longer than %d characters", tag, maxTagLength)
+		}
+	}
+	return dueDate, priority, tags, nil
+}
+
+func setTaskMetadata(task *Task, dueDate, priority, tagList string) error {
+	dueDate, priority, tags, err := parseTaskMetadata(dueDate, priority, tagList)
+	if err != nil {
+		return err
+	}
+	task.DueDate = dueDate
+	task.Priority = priority
+	task.Tags = tags
+	return nil
+}
+
+func setTaskMetadataTags(task *Task, dueDate, priority string, inputTags []string) error {
+	dueDate, priority, tags, err := parseTaskMetadataTags(dueDate, priority, inputTags)
+	if err != nil {
+		return err
+	}
+	task.DueDate = dueDate
+	task.Priority = priority
+	task.Tags = tags
+	return nil
+}
+
+func validateTaskTree(task *Task) error {
+	if task == nil {
+		return errors.New("task tree is null")
+	}
+	if task.Id != rootPath {
+		if !validPriority(task.Priority) {
+			return fmt.Errorf("task %q has invalid priority %q", task.Id, task.Priority)
+		}
+		if task.DueDate != "" {
+			parsed, err := time.Parse("2006-01-02", task.DueDate)
+			if err != nil || parsed.Format("2006-01-02") != task.DueDate {
+				return fmt.Errorf("task %q has invalid due date %q", task.Id, task.DueDate)
+			}
+		}
+		if len(task.Tags) > maxTags {
+			return fmt.Errorf("task %q has %d tags; the maximum is %d", task.Id, len(task.Tags), maxTags)
+		}
+		for _, tag := range task.Tags {
+			if strings.TrimSpace(tag) == "" || len([]rune(tag)) > maxTagLength {
+				return fmt.Errorf("task %q has invalid tag %q", task.Id, tag)
+			}
+		}
+	}
+	for _, attachment := range task.Attachments {
+		if attachment == nil || !isBlobRef(attachment.Blob) || attachment.Size < 0 {
+			return fmt.Errorf("task %q has invalid attachment content metadata", task.Id)
+		}
+	}
+	for _, child := range task.SubTasks {
+		if err := validateTaskTree(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func firstNonEmpty(value, fallback string) string {
@@ -455,9 +589,97 @@ func collectBlobRefs(task *Task, refs map[string]bool) {
 }
 
 // taskMatches reports whether the lower-cased needle occurs in the task's
-// title or notes.
+// title, notes, or tags.
 func taskMatches(task *Task, loweredNeedle string) bool {
-	return strings.Contains(strings.ToLower(task.Name+"\n"+task.Text), loweredNeedle)
+	return strings.Contains(strings.ToLower(task.Name+"\n"+task.Text+"\n"+strings.Join(task.Tags, "\n")), loweredNeedle)
+}
+
+func applyBulkTaskAction(root *Task, ids []string, action string) error {
+	if len(ids) == 0 {
+		return errNoTasksSelected
+	}
+	tasks := make([]*Task, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		chain := visibleTaskChain(strings.TrimSpace(id), root)
+		if len(chain) == 0 || chain[len(chain)-1] == root {
+			return errTaskNotFound
+		}
+		task := chain[len(chain)-1]
+		if !seen[task.Id] {
+			seen[task.Id] = true
+			tasks = append(tasks, task)
+		}
+	}
+	now := time.Now().UTC()
+	for _, task := range tasks {
+		switch action {
+		case "check":
+			task.Track = true
+			task.Checked = true
+		case "uncheck":
+			task.Track = true
+			task.Checked = false
+		case "delete":
+			task.Deleted = true
+		default:
+			return errInvalidBulkAction
+		}
+		task.UpdatedAt = now
+	}
+	return nil
+}
+
+func selectedTaskExport(root *Task, ids []string) (*Task, error) {
+	if len(ids) == 0 {
+		return nil, errNoTasksSelected
+	}
+	selected := map[string]bool{}
+	chains := make([][]*Task, 0, len(ids))
+	for _, id := range ids {
+		chain := visibleTaskChain(strings.TrimSpace(id), root)
+		if len(chain) == 0 || chain[len(chain)-1] == root {
+			return nil, errTaskNotFound
+		}
+		selected[chain[len(chain)-1].Id] = true
+		chains = append(chains, chain)
+	}
+	exported := defaultRoot()
+	exported.Name = "Quester selected tasks"
+	exported.Text = "Selected task export"
+	exported.Forums = append([]*Forum(nil), root.Forums...)
+	exported.Users = append([]*User(nil), root.Users...)
+	added := map[string]bool{}
+	for _, chain := range chains {
+		task := chain[len(chain)-1]
+		if added[task.Id] || selectedAncestor(chain, selected) {
+			continue
+		}
+		exported.SubTasks = append(exported.SubTasks, cloneTaskTree(task))
+		added[task.Id] = true
+	}
+	return exported, nil
+}
+
+func selectedAncestor(chain []*Task, selected map[string]bool) bool {
+	for _, ancestor := range chain[1 : len(chain)-1] {
+		if selected[ancestor.Id] {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneTaskTree(task *Task) *Task {
+	cloned := *task
+	cloned.Attachments = append([]*Attachment(nil), task.Attachments...)
+	cloned.SubTasks = make([]*Node, 0, len(task.SubTasks))
+	for _, child := range task.SubTasks {
+		if child != nil {
+			cloned.SubTasks = append(cloned.SubTasks, cloneTaskTree(child))
+		}
+	}
+	return &cloned
 }
 
 func findAttachment(root *Task, id string) (*Task, *Attachment) {

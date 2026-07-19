@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -41,9 +43,15 @@ func TestStoreUpdatePersistsAtomicallyNamedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var files []os.DirEntry
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			files = append(files, entry)
+		}
 	}
 	if len(files) != 1 {
 		t.Fatalf("stored files = %d, want 1", len(files))
@@ -58,6 +66,45 @@ func TestStoreUpdatePersistsAtomicallyNamedFile(t *testing.T) {
 	}
 	if got := FindTask(rootPath+"/abc", root); got == nil || got.Name != "A" {
 		t.Fatalf("stored task = %#v, want A", got)
+	}
+}
+
+func TestStoresSharingDirectorySerializeUpdates(t *testing.T) {
+	dir := t.TempDir()
+	first, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := []*Store{first, second}
+	errors := make(chan error, 20)
+	var wait sync.WaitGroup
+	for index := 0; index < 20; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			errors <- stores[index%len(stores)].Update(defaultUserID, func(root *Task) error {
+				root.SubTasks = append(root.SubTasks, newTask(fmt.Sprintf("Task %d", index), "", defaultForumID, defaultUserID, true))
+				return nil
+			})
+		}(index)
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := first.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.SubTasks) != 20 {
+		t.Fatalf("stored tasks = %d, want 20", len(root.SubTasks))
 	}
 }
 
@@ -133,6 +180,9 @@ func TestStoreRestoreRejectsInvalidJSON(t *testing.T) {
 
 	if err := store.Restore(defaultUserID, []byte("{not-json")); err == nil {
 		t.Fatal("Restore accepted invalid JSON")
+	}
+	if err := store.Restore(defaultUserID, []byte("null")); err == nil {
+		t.Fatal("Restore accepted a null task tree")
 	}
 }
 

@@ -62,6 +62,11 @@ type TaskNode struct {
 	ForumName   string
 	IsRoot      bool
 	CanDelete   bool
+	Bulk        bool
+	DisplayName string
+	DueDate     string
+	Priority    string
+	Tags        string
 	Attachments []*DocumentNode
 	Documents   []*DocumentNode
 	Children    []*TaskNode
@@ -124,6 +129,11 @@ func buildSearchResults(root *Task, query, prefix, next string) []*TaskNode {
 					AgentAuthor: trail.agentAuthor(task.AuthorId),
 					ForumID:     task.ForumId,
 					ForumName:   trail.forumName(task.ForumId),
+					Bulk:        true,
+					DisplayName: taskDisplayName(task),
+					DueDate:     task.DueDate,
+					Priority:    task.Priority,
+					Tags:        strings.Join(task.Tags, ", "),
 				})
 			}
 			walk(task)
@@ -179,6 +189,7 @@ type DocumentNode struct {
 	Origin    string
 	OriginURL string
 	Replaces  string
+	Preview   bool
 }
 
 // docTrail accumulates document versions along a root-to-node path so the
@@ -255,6 +266,7 @@ func documentNode(attachment *Attachment, task *Task, path, prefix string, versi
 		Origin:    task.Name,
 		OriginURL: prefix + "detailed?q=" + url.QueryEscape(path),
 		Replaces:  attachment.Replaces,
+		Preview:   imagePreviewAllowed(attachment.Name),
 	}
 }
 
@@ -290,6 +302,10 @@ func buildTaskNodeWithTrail(task *Task, path, prefix, next string, depth int, tr
 		ForumName:   trail.forumName(task.ForumId),
 		IsRoot:      task.Id == rootPath,
 		CanDelete:   task.Id != rootPath,
+		DisplayName: taskDisplayName(task),
+		DueDate:     task.DueDate,
+		Priority:    normalizePriority(task.Priority),
+		Tags:        strings.Join(task.Tags, ", "),
 	}
 	node.Attachments = trail.add(task, task.Id, prefix)
 	node.Documents = trail.snapshot()
@@ -297,6 +313,19 @@ func buildTaskNodeWithTrail(task *Task, path, prefix, next string, depth int, tr
 		node.Children = append(node.Children, buildTaskNodeWithTrail(child, child.Id, prefix, next, depth+1, trail.clone()))
 	}
 	return node
+}
+
+func taskDisplayName(task *Task) string {
+	if strings.TrimSpace(task.Name) != "" {
+		return task.Name
+	}
+	return "untitled reply"
+}
+
+func imagePreviewAllowed(name string) bool {
+	contentType, disposition := documentContentType(name)
+	mediaType := strings.SplitN(contentType, ";", 2)[0]
+	return disposition == "inline" && strings.HasPrefix(mediaType, "image/")
 }
 
 func buildForumNodes(root *Task, activeID, prefix string) []*ForumNode {
@@ -495,7 +524,8 @@ const pageTemplates = `
 	<style>{{.Style}}</style>
 </head>
 <body>
-	<nav class="topbar">
+	<a class="skip-link" href="#links">Skip to task content</a>
+	<nav class="topbar" aria-label="Primary navigation">
 		<a class="brand" href="{{.Prefix}}summary">unfinished business</a>
 			<div class="nav-actions">
 				<a href="{{.Prefix}}search">Search</a>
@@ -515,14 +545,14 @@ const pageTemplates = `
 		</header>
 		{{if .Forums}}
 		<nav class="forumbar" aria-label="Forums">
-			{{range .Forums}}<a {{if .Active}}class="active"{{end}} href="{{.URL}}">{{.Name}}</a>{{end}}
+			{{range .Forums}}<a {{if .Active}}class="active" aria-current="page"{{end}} href="{{.URL}}">{{.Name}}</a>{{end}}
 		</nav>
 		{{end}}
 		<section id="intro">
 			{{range .Forums}}{{if .Active}}<h2>{{.Name}}{{if .Description}} — {{.Description}}{{end}}</h2>{{end}}{{end}}
 		</section>
-	{{if .Error}}<div class="notice">{{.Error}}</div>{{end}}
-	<main class="sr" id="links">
+	{{if .Error}}<div class="notice" role="alert">{{.Error}}</div>{{end}}
+	<main class="sr" id="links" tabindex="-1">
 {{end}}
 
 {{define "footer"}}
@@ -545,8 +575,10 @@ const pageTemplates = `
 		<button type="submit">Sort</button>
 		<p class="meta">Created time shows newest first; completion shows open tasks first; title sorts alphabetically.</p>
 	</form>
+	<p class="backup-reminder">Download a <a href="{{.Prefix}}downloadAll">self-contained backup</a> regularly and copy it away from this computer.</p>
 	{{if .Summary}}
 		{{range .Summary}}{{template "summaryItem" .}}{{end}}
+		{{template "bulkControls" .}}
 	{{else}}
 		<p class="empty">No tasks yet.</p>
 	{{end}}
@@ -569,7 +601,7 @@ const pageTemplates = `
 		<ul class="attachments">
 			{{$node := .}}
 			{{range .Documents}}
-				<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}} · <a href="{{$node.Prefix}}documentHistory?q={{$node.Path}}&doc={{.ID}}">history</a></span></li>
+				<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · attached to <a href="{{.OriginURL}}">{{.Origin}}</a> · {{.Attached}} · <a href="{{$node.Prefix}}documentHistory?q={{$node.Path}}&doc={{.ID}}">history</a></span>{{if .Preview}}<a class="image-preview" href="{{.URL}}"><img src="{{.URL}}" loading="lazy" alt="Preview of {{.Name}}"></a>{{end}}</li>
 			{{end}}
 		</ul>
 	</section>
@@ -626,12 +658,13 @@ const pageTemplates = `
 	<section class="panel">
 		<h2>Search tasks</h2>
 		<form action="{{.Prefix}}search" method="get">
-			<label for="query">Title or notes</label>
+		<label for="query">Title, notes, or tags</label>
 			<input id="query" name="q" type="text" value="{{.Query}}" autocomplete="off">
 			<button type="submit">Search</button>
 		</form>
 	</section>
 	{{range .Results}}{{template "summaryItem" .}}{{else}}{{if .Query}}<p class="empty">No matching tasks.</p>{{end}}{{end}}
+	{{if .Results}}{{template "bulkControls" .}}{{end}}
 {{template "footer" .}}
 {{end}}
 
@@ -681,20 +714,37 @@ const pageTemplates = `
 
 	{{define "summaryItem"}}
 		<article class="link {{if .Checked}}is-checked{{end}}">
+			<div class="task-controls">
+			{{if .Bulk}}<label class="select-task"><input type="checkbox" name="task" value="{{.ID}}" form="bulk-actions"><span class="visually-hidden">Select {{.DisplayName}}</span></label>{{end}}
 			{{if .Track}}
 			<form class="vote toggle-form" action="{{.Prefix}}toggle" method="post">
 			<input type="hidden" name="csrf" value="{{.CSRF}}">
 			<input type="hidden" name="path" value="{{.Path}}">
 			<input type="hidden" name="next" value="{{.Next}}">
-				<button type="submit" aria-label="Toggle {{.Name}}">{{if .Checked}}done{{else}}open{{end}}</button>
+				<button type="submit" aria-label="Mark {{.DisplayName}} {{if .Checked}}open{{else}}done{{end}}">{{if .Checked}}done{{else}}open{{end}}</button>
 			</form>
 			{{end}}
+			</div>
 			<div class="entry">
 				<h2><a href="{{.Prefix}}detailed?q={{.Path}}">{{.Name}}</a></h2>
 				{{if .Text}}<p class="selftext">{{.Text}}</p>{{end}}
 				<p class="meta">submitted by {{.Author}}{{if .AgentAuthor}} (AI){{end}} {{.Created}} <a class="comments" href="{{.Prefix}}detailed?q={{.Path}}">{{len .Children}} comments</a>{{if .Attachments}} <span class="comments">{{len .Attachments}} attached</span>{{end}}</p>
+				<p class="meta">Priority: {{.Priority}}{{if .DueDate}} · due {{.DueDate}}{{end}}{{if .Tags}} · tags: {{.Tags}}{{end}}</p>
 		</div>
 	</article>
+{{end}}
+
+{{define "bulkControls"}}
+	<form id="bulk-actions" class="bulk-actions" action="{{.Prefix}}bulkTasks" method="post">
+		<input type="hidden" name="csrf" value="{{.CSRF}}">
+		<input type="hidden" name="next" value="{{.CurrentURL}}">
+		<strong>Selected tasks</strong>
+		<button type="submit" name="action" value="check">Mark done</button>
+		<button type="submit" name="action" value="uncheck">Mark open</button>
+		<button type="submit" name="action" value="export">Export</button>
+		<button class="danger" type="submit" name="action" value="delete">Delete</button>
+		<p class="meta">Select task checkboxes above, then update them together or download a zip containing the selected task trees and their attachments.</p>
+	</form>
 {{end}}
 
 {{define "taskTree"}}
@@ -706,17 +756,18 @@ const pageTemplates = `
 					<input type="hidden" name="csrf" value="{{.CSRF}}">
 					<input type="hidden" name="path" value="{{.Path}}">
 					<input type="hidden" name="next" value="{{.Next}}">
-					<button type="submit">{{if .Checked}}done{{else}}open{{end}}</button>
+					<button type="submit" aria-label="Mark {{.DisplayName}} {{if .Checked}}open{{else}}done{{end}}">{{if .Checked}}done{{else}}open{{end}}</button>
 					</form>{{end}}
 					<div class="md">
 						{{if .Name}}<h2>{{.Name}}</h2>{{end}}
 						{{if .Text}}<p>{{.Text}}</p>{{end}}
 						<p class="meta">{{.Author}}{{if .AgentAuthor}} (AI){{end}} · {{.Created}} · {{.ForumName}} · node {{.ID}}</p>
+						<p class="meta">Priority: {{.Priority}}{{if .DueDate}} · due {{.DueDate}}{{end}}{{if .Tags}} · tags: {{.Tags}}{{end}}</p>
 				</div>
 				{{if .Attachments}}
 				<ul class="attachments">
 					{{range .Attachments}}
-						<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · <a href="{{$.Prefix}}documentHistory?q={{$.Path}}&doc={{.ID}}">history</a></span></li>
+						<li><a href="{{.URL}}">{{.Name}}</a> <span class="meta">v{{.Version}} · {{.Ref}} · {{.Size}} · <a href="{{$.Prefix}}documentHistory?q={{$.Path}}&doc={{.ID}}">history</a></span>{{if .Preview}}<a class="image-preview" href="{{.URL}}"><img src="{{.URL}}" loading="lazy" alt="Preview of {{.Name}}"></a>{{end}}</li>
 					{{end}}
 				</ul>
 				{{end}}
@@ -758,6 +809,20 @@ const pageTemplates = `
 				<p class="meta">Required for a forum post; optional for a reply.</p>
 				<label for="content">Text</label>
 				<textarea id="content" name="content" rows="3"></textarea>
+				<label for="due">Due date</label>
+				<input id="due" name="due" type="date">
+				<p class="meta">Optional calendar date for when this task should be finished.</p>
+				<label for="priority">Priority</label>
+				<select id="priority" name="priority">
+					<option value="low">Low</option>
+					<option value="normal" selected>Normal</option>
+					<option value="high">High</option>
+					<option value="urgent">Urgent</option>
+				</select>
+				<p class="meta">Priority records relative urgency; new tasks default to normal.</p>
+				<label for="tags">Tags</label>
+				<input id="tags" name="tags" type="text" autocomplete="off">
+				<p class="meta">Optional comma-separated labels. Search finds matching tags.</p>
 				<label for="document">Attach</label>
 				<input id="document" name="document" type="file" multiple>
 				<p class="meta">Attach files to this post or reply. The combined upload limit is 100 MB.</p>
@@ -799,6 +864,20 @@ const pageTemplates = `
 				<input id="edit-title" name="title" type="text" value="{{.Current.Name}}" autocomplete="off">
 			<label for="edit-content">Notes</label>
 			<textarea id="edit-content" name="content" rows="3">{{.Current.Text}}</textarea>
+			<label for="edit-due">Due date</label>
+			<input id="edit-due" name="due" type="date" value="{{.Current.DueDate}}">
+			<p class="meta">Optional calendar date for when this task should be finished.</p>
+			<label for="edit-priority">Priority</label>
+			<select id="edit-priority" name="priority">
+				<option value="low" {{if eq .Current.Priority "low"}}selected{{end}}>Low</option>
+				<option value="normal" {{if eq .Current.Priority "normal"}}selected{{end}}>Normal</option>
+				<option value="high" {{if eq .Current.Priority "high"}}selected{{end}}>High</option>
+				<option value="urgent" {{if eq .Current.Priority "urgent"}}selected{{end}}>Urgent</option>
+			</select>
+			<p class="meta">Priority records relative urgency; normal is the default.</p>
+			<label for="edit-tags">Tags</label>
+			<input id="edit-tags" name="tags" type="text" value="{{.Current.Tags}}" autocomplete="off">
+			<p class="meta">Optional comma-separated labels. Search finds matching tags.</p>
 			<button type="submit">Update</button>
 			</form>
 

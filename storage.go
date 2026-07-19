@@ -15,13 +15,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 const blobDirName = "blobs"
 
 type Store struct {
-	dir string
-	mu  sync.Mutex
+	dir      string
+	mu       sync.Mutex
+	fileLock *flock.Flock
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -31,18 +34,22 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, fileLock: flock.New(filepath.Join(dir, ".quester.lock"))}, nil
 }
 
 func (s *Store) Load(userID string) (*Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lock(); err != nil {
+		return nil, err
+	}
+	defer s.unlock()
 	return s.loadUnlocked(safeUserID(userID))
 }
 
 func (s *Store) Update(userID string, update func(*Task) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lock(); err != nil {
+		return err
+	}
+	defer s.unlock()
 
 	fileID := safeUserID(userID)
 	root, err := s.loadUnlocked(fileID)
@@ -56,14 +63,40 @@ func (s *Store) Update(userID string, update func(*Task) error) error {
 }
 
 func (s *Store) Restore(userID string, data []byte) error {
-	var root Task
+	var root *Task
 	if err := json.Unmarshal(data, &root); err != nil {
 		return fmt.Errorf("backup is not valid task JSON: %w", err)
 	}
+	if root == nil {
+		return errors.New("backup is not valid task JSON: expected a task object, received null")
+	}
+	normalized := normalizeTree(root)
+	if err := validateTaskTree(normalized); err != nil {
+		return fmt.Errorf("backup contains invalid task data: %w", err)
+	}
 
+	if err := s.lock(); err != nil {
+		return err
+	}
+	defer s.unlock()
+	return s.saveUnlocked(safeUserID(userID), normalized)
+}
+
+func (s *Store) lock() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveUnlocked(safeUserID(userID), normalizeTree(&root))
+	if err := s.fileLock.Lock(); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("lock data directory %q: %w", s.dir, err)
+	}
+	return nil
+}
+
+func (s *Store) unlock() {
+	if err := s.fileLock.Unlock(); err != nil {
+		s.mu.Unlock()
+		panic(fmt.Errorf("unlock data directory %q: %w", s.dir, err))
+	}
+	s.mu.Unlock()
 }
 
 // RestoreArchive restores a zip backup produced by downloadAll: blob content
@@ -144,11 +177,18 @@ func (s *Store) loadUnlocked(fileID string) (*Task, error) {
 		return defaultRoot(), nil
 	}
 
-	var root Task
+	var root *Task
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse tasks: %w", err)
 	}
-	return normalizeTree(&root), nil
+	if root == nil {
+		return nil, errors.New("parse tasks: expected a task object, received null")
+	}
+	normalized := normalizeTree(root)
+	if err := validateTaskTree(normalized); err != nil {
+		return nil, fmt.Errorf("validate tasks: %w", err)
+	}
+	return normalized, nil
 }
 
 func (s *Store) saveUnlocked(fileID string, root *Task) error {
@@ -256,16 +296,20 @@ type BlobInfo struct {
 // stores its blob before the attachment record lands, so a fresh blob may be
 // referenced a moment later.
 func (s *Store) UnreferencedBlobs(minAge time.Duration) ([]BlobInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lock(); err != nil {
+		return nil, err
+	}
+	defer s.unlock()
 	return s.unreferencedBlobsLocked(minAge)
 }
 
 // DeleteUnreferencedBlobs removes what UnreferencedBlobs reports, recomputed
 // under the store lock so a reference written in between is honored.
 func (s *Store) DeleteUnreferencedBlobs(minAge time.Duration) ([]BlobInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.lock(); err != nil {
+		return nil, err
+	}
+	defer s.unlock()
 	garbage, err := s.unreferencedBlobsLocked(minAge)
 	if err != nil {
 		return nil, err

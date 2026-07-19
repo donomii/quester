@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -611,7 +612,7 @@ func TestForumAndAgentAPIFlow(t *testing.T) {
 	}
 	forumResponse.Body.Close()
 
-	postResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes", `{"forum_id":"`+forum.Id+`","title":"Japan","body":"@trip-agent plan the trip"}`, map[string]string{
+	postResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes", `{"forum_id":"`+forum.Id+`","title":"Japan","body":"@trip-agent plan the trip","due_date":"2026-09-01","priority":"high","tags":["travel","planning"]}`, map[string]string{
 		"X-Quester-User": "planner",
 		"X-Quester-Name": "Planner",
 	})
@@ -623,6 +624,9 @@ func TestForumAndAgentAPIFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	postResponse.Body.Close()
+	if post.DueDate != "2026-09-01" || post.Priority != "high" || !reflect.DeepEqual(post.Tags, []string{"travel", "planning"}) {
+		t.Fatalf("API task metadata = due %q priority %q tags %#v", post.DueDate, post.Priority, post.Tags)
+	}
 
 	replyResponse := performJSONRequest(router, http.MethodPost, "/quester/api/nodes", `{"parent_id":"`+post.ID+`","body":"I found a later flight."}`, map[string]string{
 		"X-Quester-User":  "trip-agent",
@@ -728,6 +732,82 @@ func TestAPIAttachmentRevisionUsesExplicitLink(t *testing.T) {
 	second.Body.Close()
 	if got := secondNode.Attachments[1].Replaces; got != firstID {
 		t.Fatalf("replacement link = %q, want %q", got, firstID)
+	}
+}
+
+func TestMetadataBulkActionsAndImagePreviewFlow(t *testing.T) {
+	app, router := newTestApp(t)
+	created := postForm(t, router, "/quester/addWaypoint", url.Values{
+		"q":        {rootPath},
+		"forum":    {defaultForumID},
+		"title":    {"Prepare launch"},
+		"due":      {"2026-08-15"},
+		"priority": {"urgent"},
+		"tags":     {"release, operations"},
+	})
+	created.Body.Close()
+	if created.StatusCode != http.StatusSeeOther {
+		t.Fatalf("create status = %d, want 303", created.StatusCode)
+	}
+	root, err := app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := root.SubTasks[0]
+	if task.DueDate != "2026-08-15" || task.Priority != "urgent" || !reflect.DeepEqual(task.Tags, []string{"release", "operations"}) {
+		t.Fatalf("stored metadata = due %q priority %q tags %#v", task.DueDate, task.Priority, task.Tags)
+	}
+	attached := postMultipart(t, router, "/quester/attachDocument", url.Values{"q": {task.Id}}, []testUpload{
+		{"document", "camera.png", "png bytes"},
+		{"document", "diagram.svg", "<svg></svg>"},
+	})
+	attached.Body.Close()
+	if attached.StatusCode != http.StatusSeeOther {
+		t.Fatalf("attach status = %d, want 303", attached.StatusCode)
+	}
+	detail := performRequest(router, http.MethodGet, "/quester/detailed?q="+task.Id, nil)
+	detailBody := readBody(t, detail)
+	detail.Body.Close()
+	if !strings.Contains(detailBody, "Preview of camera.png") || strings.Contains(detailBody, "Preview of diagram.svg") {
+		t.Fatalf("image preview policy was not rendered correctly: %s", detailBody)
+	}
+	search := performRequest(router, http.MethodGet, "/quester/search?q=operations", nil)
+	searchBody := readBody(t, search)
+	search.Body.Close()
+	if !strings.Contains(searchBody, "Prepare launch") {
+		t.Fatalf("tag search did not find task: %s", searchBody)
+	}
+	checked := postForm(t, router, "/quester/bulkTasks", url.Values{
+		"task":   {task.Id},
+		"action": {"check"},
+		"next":   {"/quester/summary"},
+	})
+	checked.Body.Close()
+	if checked.StatusCode != http.StatusSeeOther {
+		t.Fatalf("bulk check status = %d, want 303", checked.StatusCode)
+	}
+	root, err = app.store.Load(defaultUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !root.SubTasks[0].Checked {
+		t.Fatal("bulk action did not mark selected task done")
+	}
+	exported := postForm(t, router, "/quester/bulkTasks", url.Values{"task": {task.Id}, "action": {"export"}})
+	exportData, err := io.ReadAll(exported.Body)
+	exported.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported.StatusCode != http.StatusOK || exported.Header.Get("Content-Disposition") != `attachment; filename="quester-selected-tasks.zip"` {
+		t.Fatalf("bulk export status = %d disposition = %q", exported.StatusCode, exported.Header.Get("Content-Disposition"))
+	}
+	archive, err := zip.NewReader(bytes.NewReader(exportData), int64(len(exportData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.File) != 3 {
+		t.Fatalf("bulk export entries = %d, want tasks.json and two blobs", len(archive.File))
 	}
 }
 

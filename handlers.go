@@ -29,12 +29,14 @@ const (
 )
 
 var (
-	errTaskNotFound     = errors.New("task not found")
-	errCannotDeleteRoot = errors.New("cannot delete the root task")
-	errForumNotFound    = errors.New("forum not found")
-	errInvalidMove      = errors.New("node cannot be moved beneath itself or one of its replies")
-	errDocumentNotFound = errors.New("document not found")
-	errTitleRequired    = errors.New("a title is required for a forum post")
+	errTaskNotFound      = errors.New("task not found")
+	errCannotDeleteRoot  = errors.New("cannot delete the root task")
+	errForumNotFound     = errors.New("forum not found")
+	errInvalidMove       = errors.New("node cannot be moved beneath itself or one of its replies")
+	errDocumentNotFound  = errors.New("document not found")
+	errTitleRequired     = errors.New("a title is required for a forum post")
+	errNoTasksSelected   = errors.New("no tasks selected")
+	errInvalidBulkAction = errors.New("invalid bulk action")
 )
 
 type App struct {
@@ -93,6 +95,7 @@ func (a *App) Register(router *gin.Engine) {
 	router.POST(a.prefix+"editWaypoint", a.mutating(a.editWaypoint))
 	router.POST(a.prefix+"moveWaypoint", a.mutating(a.moveWaypoint))
 	router.POST(a.prefix+"toggle", a.mutating(a.toggle))
+	router.POST(a.prefix+"bulkTasks", a.mutating(a.bulkTasks))
 	a.registerAPI(router)
 }
 
@@ -201,7 +204,9 @@ func (a *App) summary(c *gin.Context, userID string) {
 		if filter == "new" && child.Checked {
 			continue
 		}
-		summary = append(summary, buildTaskNodeWithTrail(child, joinTaskPath(rootPath, child.Id), a.prefix, next, 0, rootTrail.clone()))
+		node := buildTaskNodeWithTrail(child, joinTaskPath(rootPath, child.Id), a.prefix, next, 0, rootTrail.clone())
+		node.Bulk = true
+		summary = append(summary, node)
 	}
 
 	a.render(c, http.StatusOK, "summary", PageData{
@@ -462,36 +467,38 @@ func (a *App) downloadAll(c *gin.Context, userID string) {
 		return
 	}
 
-	payload, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		a.renderError(c, http.StatusInternalServerError, "Could not encode tasks.")
-		return
-	}
-
 	c.Header("Content-Disposition", `attachment; filename="quester-backup.zip"`)
 	c.Header("Content-Type", "application/zip")
 	c.Status(http.StatusOK)
+	if err := a.writeBackupArchive(c.Writer, root); err != nil {
+		logBackupFailed(err)
+	}
+}
 
-	archive := zip.NewWriter(c.Writer)
+func (a *App) writeBackupArchive(destination io.Writer, root *Task) error {
+	payload, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode task tree for backup: %w", err)
+	}
+	archive := zip.NewWriter(destination)
 	entry, err := archive.Create("tasks.json")
 	if err == nil {
 		_, err = entry.Write(payload)
 	}
 	if err != nil {
-		logBackupFailed(err)
-		return
+		return fmt.Errorf("write tasks.json backup entry: %w", err)
 	}
 	refs := map[string]bool{}
 	collectBlobRefs(root, refs)
 	for _, ref := range slices.Sorted(maps.Keys(refs)) {
 		if err := a.addBlobEntry(archive, ref); err != nil {
-			logBackupFailed(err)
-			return
+			return fmt.Errorf("write blob %s to backup: %w", ref, err)
 		}
 	}
 	if err := archive.Close(); err != nil {
-		logBackupFailed(err)
+		return fmt.Errorf("finish backup archive: %w", err)
 	}
+	return nil
 }
 
 // addBlobEntry copies one blob into the backup. A blob whose file is already
@@ -593,6 +600,10 @@ func (a *App) addWaypoint(c *gin.Context, userID string) {
 	task := newTask(c.PostForm("title"), c.PostForm("content"), forumID, authorID, track)
 	if parent == rootPath {
 		task.Name = cleanTitle(task.Name)
+	}
+	if err := setTaskMetadata(task, c.PostForm("due"), c.PostForm("priority"), c.PostForm("tags")); err != nil {
+		a.renderError(c, http.StatusBadRequest, err.Error()+".")
+		return
 	}
 
 	replaces := strings.TrimSpace(c.PostForm("replaces"))
@@ -721,8 +732,13 @@ func (a *App) editWaypoint(c *gin.Context, userID string) {
 	path := normalizedPath(c.PostForm("q"))
 	title := c.PostForm("title")
 	content := c.PostForm("content")
+	dueDate, priority, tags, err := parseTaskMetadata(c.PostForm("due"), c.PostForm("priority"), c.PostForm("tags"))
+	if err != nil {
+		a.renderError(c, http.StatusBadRequest, err.Error()+".")
+		return
+	}
 
-	err := a.store.Update(userID, func(root *Task) error {
+	err = a.store.Update(userID, func(root *Task) error {
 		chain := visibleTaskChain(path, root)
 		if len(chain) == 0 {
 			return errTaskNotFound
@@ -734,6 +750,9 @@ func (a *App) editWaypoint(c *gin.Context, userID string) {
 			task.Name = cleanOptionalTitle(title)
 		}
 		task.Text = strings.TrimSpace(content)
+		task.DueDate = dueDate
+		task.Priority = priority
+		task.Tags = tags
 		task.UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -763,6 +782,36 @@ func (a *App) toggle(c *gin.Context, userID string) {
 		return
 	}
 	a.redirectBack(c, a.detailURL(path))
+}
+
+func (a *App) bulkTasks(c *gin.Context, userID string) {
+	ids := c.PostFormArray("task")
+	action := strings.TrimSpace(c.PostForm("action"))
+	if action == "export" {
+		root, err := a.store.Load(userID)
+		if err != nil {
+			a.renderError(c, http.StatusInternalServerError, "Could not load tasks for export.")
+			return
+		}
+		exported, err := selectedTaskExport(root, ids)
+		if err != nil {
+			a.handleMutationError(c, err)
+			return
+		}
+		c.Header("Content-Disposition", `attachment; filename="quester-selected-tasks.zip"`)
+		c.Header("Content-Type", "application/zip")
+		c.Status(http.StatusOK)
+		if err := a.writeBackupArchive(c.Writer, exported); err != nil {
+			logBackupFailed(err)
+		}
+		return
+	}
+	err := a.store.Update(userID, func(root *Task) error { return applyBulkTaskAction(root, ids, action) })
+	if err != nil {
+		a.handleMutationError(c, err)
+		return
+	}
+	a.redirectBack(c, a.prefix+"summary")
 }
 
 func (a *App) search(c *gin.Context, userID string) {
@@ -857,6 +906,10 @@ func (a *App) handleMutationError(c *gin.Context, err error) {
 		a.renderError(c, http.StatusBadRequest, "The document being replaced was not found.")
 	case errors.Is(err, errTitleRequired):
 		a.renderError(c, http.StatusBadRequest, "A title is required when promoting a reply to a forum post.")
+	case errors.Is(err, errNoTasksSelected):
+		a.renderError(c, http.StatusBadRequest, "Select at least one task.")
+	case errors.Is(err, errInvalidBulkAction):
+		a.renderError(c, http.StatusBadRequest, "Choose a valid bulk action.")
 	default:
 		logMutationFailed(err)
 		a.renderError(c, http.StatusInternalServerError, "Could not save tasks.")
