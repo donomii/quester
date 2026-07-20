@@ -14,6 +14,7 @@ Quester is buildable and usable now. Remaining work is optional hardening and pr
 - [x] Show a backup reminder on the task summary and document a periodic off-host backup routine.
 - [x] Serialize task-tree access with a data-directory file lock so separate Quester processes cannot lose one another's updates.
 - [x] Make backups self-contained: include `blobs/` content in downloadAll/restoreAll (zip archive).
+- [x] Bound restore archives and validate them completely in recoverable staging before atomically replacing live task data.
 - [x] Add garbage collection for blob files no longer referenced by any attachment record.
 
 ## Product

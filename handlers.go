@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	maxRestoreBytes    = 10 << 20
 	maxAttachmentBytes = 100 << 20
 	blobGCMinAge       = time.Hour
 )
@@ -81,7 +80,7 @@ func (a *App) Register(router *gin.Engine) {
 	router.GET(a.prefix+"deleted", a.authed(a.deleted))
 	router.GET(a.prefix+"downloadAll", a.authed(a.downloadAll))
 	router.GET(a.prefix+"restoreAllPage", a.authed(a.restoreAllDisplay))
-	router.POST(a.prefix+"restoreAll", a.formMutation(a.restoreAll, 0))
+	router.POST(a.prefix+"restoreAll", a.formMutation(a.restoreAll, maxRestoreBodyBytes))
 	router.GET(a.prefix+"cleanupPage", a.authed(a.cleanupDisplay))
 	router.POST(a.prefix+"cleanup", a.mutating(a.cleanupRun))
 	router.GET(a.prefix+"detailed", a.authed(a.detailed))
@@ -132,8 +131,7 @@ func (a *App) mutating(handler authedHandler) gin.HandlerFunc {
 
 // formMutation guards an HTML form post: the browser origin must match, and
 // the form must carry a CSRF token minted for this browser's cookie. A
-// sizeCap of 0 skips the multipart body limit; restore uploads may carry
-// every blob of a backup and are only bounded by disk.
+// sizeCap of 0 skips the multipart body limit.
 func (a *App) formMutation(handler authedHandler, sizeCap int64) gin.HandlerFunc {
 	authed := a.authed(handler)
 	return func(c *gin.Context) {
@@ -146,7 +144,7 @@ func (a *App) formMutation(handler authedHandler, sizeCap int64) gin.HandlerFunc
 				c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, sizeCap)
 			}
 			if _, err := c.MultipartForm(); err != nil {
-				status, message := attachmentError(err)
+				status, message := multipartFormError(err, sizeCap)
 				a.renderError(c, status, message)
 				return
 			}
@@ -157,6 +155,14 @@ func (a *App) formMutation(handler authedHandler, sizeCap int64) gin.HandlerFunc
 		}
 		authed(c)
 	}
+}
+
+func multipartFormError(err error, sizeCap int64) (status int, message string) {
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		return http.StatusRequestEntityTooLarge, fmt.Sprintf("Form upload exceeds the %d byte request limit.", sizeCap)
+	}
+	return attachmentError(err)
 }
 
 func (a *App) validMutationOrigin(c *gin.Context) bool {
@@ -543,6 +549,14 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 		a.renderError(c, http.StatusBadRequest, "Choose a backup file to restore.")
 		return
 	}
+	if fileHeader.Size < 0 {
+		a.renderError(c, http.StatusBadRequest, fmt.Sprintf("Backup file reports invalid byte size %d.", fileHeader.Size))
+		return
+	}
+	if fileHeader.Size > maxRestoreArchiveBytes {
+		a.renderError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Backup file is %d bytes; the maximum archive size is %d bytes.", fileHeader.Size, maxRestoreArchiveBytes))
+		return
+	}
 
 	file, err := fileHeader.Open()
 	if err != nil {
@@ -553,7 +567,11 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 
 	if isZipUpload(file) {
 		if err := a.store.RestoreArchive(userID, file, fileHeader.Size); err != nil {
-			a.renderError(c, http.StatusBadRequest, err.Error())
+			status := http.StatusBadRequest
+			if errors.Is(err, errRestoreTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			a.renderError(c, status, err.Error())
 			return
 		}
 		c.Redirect(http.StatusSeeOther, a.prefix+"summary")
@@ -561,7 +579,7 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 	}
 
 	if fileHeader.Size > maxRestoreBytes {
-		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+		a.renderError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Legacy tasks.json is %d bytes; the maximum is %d bytes.", fileHeader.Size, maxRestoreBytes))
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxRestoreBytes+1))
@@ -569,8 +587,8 @@ func (a *App) restoreAll(c *gin.Context, userID string) {
 		a.renderError(c, http.StatusBadRequest, "Could not read the backup file.")
 		return
 	}
-	if len(data) > maxRestoreBytes {
-		a.renderError(c, http.StatusRequestEntityTooLarge, "Backup file is too large.")
+	if int64(len(data)) > maxRestoreBytes {
+		a.renderError(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Legacy tasks.json exceeds the %d byte limit.", maxRestoreBytes))
 		return
 	}
 	if err := a.store.Restore(userID, data); err != nil {

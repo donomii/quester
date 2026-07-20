@@ -646,7 +646,7 @@ const pageTemplates = `
 			<input type="hidden" name="csrf" value="{{.CSRF}}">
 			<label for="content">Backup file</label>
 			<input type="file" id="content" name="content" accept="application/zip,.zip,application/json,.json" required>
-			<p class="meta">Choose a self-contained Quester zip backup or a legacy tasks.json file.</p>
+			<p class="meta">Choose a self-contained Quester zip backup or a legacy tasks.json file. Zip backups may be up to 1 GiB and contain up to 10,001 entries, with up to 100 MiB per blob and 4 GiB of expanded blob content. tasks.json may be up to 10 MiB. Quester checks the entire backup before replacing your current tasks.</p>
 			<button type="submit">Restore</button>
 		</form>
 	</section>

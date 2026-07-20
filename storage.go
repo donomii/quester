@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,7 +32,11 @@ func NewStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	return &Store{dir: dir, fileLock: flock.New(filepath.Join(dir, ".quester.lock"))}, nil
+	store := &Store{dir: dir, fileLock: flock.New(filepath.Join(dir, ".quester.lock"))}
+	if err := store.recoverRestoreStages(); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *Store) Load(userID string) (*Task, error) {
@@ -62,26 +64,6 @@ func (s *Store) Update(userID string, update func(*Task) error) error {
 	return s.saveUnlocked(fileID, normalizeTree(root))
 }
 
-func (s *Store) Restore(userID string, data []byte) error {
-	var root *Task
-	if err := json.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("backup is not valid task JSON: %w", err)
-	}
-	if root == nil {
-		return errors.New("backup is not valid task JSON: expected a task object, received null")
-	}
-	normalized := normalizeTree(root)
-	if err := validateTaskTree(normalized); err != nil {
-		return fmt.Errorf("backup contains invalid task data: %w", err)
-	}
-
-	if err := s.lock(); err != nil {
-		return err
-	}
-	defer s.unlock()
-	return s.saveUnlocked(safeUserID(userID), normalized)
-}
-
 func (s *Store) lock() error {
 	s.mu.Lock()
 	if err := s.fileLock.Lock(); err != nil {
@@ -97,72 +79,6 @@ func (s *Store) unlock() {
 		panic(fmt.Errorf("unlock data directory %q: %w", s.dir, err))
 	}
 	s.mu.Unlock()
-}
-
-// RestoreArchive restores a zip backup produced by downloadAll: blob content
-// lands in the blob store first, then tasks.json replaces the user's tree.
-// Every blob entry must hash to its content-address name, so a corrupted
-// archive fails before any attachment record can point at wrong bytes.
-func (s *Store) RestoreArchive(userID string, archive io.ReaderAt, size int64) error {
-	reader, err := zip.NewReader(archive, size)
-	if err != nil {
-		return fmt.Errorf("backup is not a readable zip archive: %w", err)
-	}
-	var tasksJSON []byte
-	for _, entry := range reader.File {
-		name := path.Clean(entry.Name)
-		switch {
-		case name == "tasks.json":
-			tasksJSON, err = readArchiveEntry(entry, maxRestoreBytes)
-			if err != nil {
-				return err
-			}
-		case strings.HasPrefix(name, blobDirName+"/"):
-			if err := s.restoreArchiveBlob(entry); err != nil {
-				return err
-			}
-		}
-	}
-	if tasksJSON == nil {
-		return errors.New("backup archive does not contain tasks.json")
-	}
-	return s.Restore(userID, tasksJSON)
-}
-
-func readArchiveEntry(entry *zip.File, limit int64) ([]byte, error) {
-	file, err := entry.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open backup entry %s: %w", entry.Name, err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("read backup entry %s: %w", entry.Name, err)
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("backup entry %s exceeds the %d byte limit", entry.Name, limit)
-	}
-	return data, nil
-}
-
-func (s *Store) restoreArchiveBlob(entry *zip.File) error {
-	ref := path.Base(path.Clean(entry.Name))
-	if !isBlobRef(ref) {
-		return fmt.Errorf("backup blob %q does not have a content-address name", entry.Name)
-	}
-	file, err := entry.Open()
-	if err != nil {
-		return fmt.Errorf("open backup blob %s: %w", entry.Name, err)
-	}
-	defer file.Close()
-	stored, _, err := s.SaveBlob(file)
-	if err != nil {
-		return fmt.Errorf("restore backup blob %s: %w", entry.Name, err)
-	}
-	if stored != ref {
-		return fmt.Errorf("backup blob %s content hashes to %s; the archive is corrupt", ref, stored)
-	}
-	return nil
 }
 
 func (s *Store) loadUnlocked(fileID string) (*Task, error) {

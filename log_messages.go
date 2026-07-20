@@ -16,6 +16,14 @@ func logBackupFailed(err error) { log.Printf("backup failed: %v", err) }
 
 func logBackupSkippedBlob(ref string, err error) { log.Printf("backup skipped blob %s: %v", ref, err) }
 
+func logRestoreCleanupFailed(stage string, err error) {
+	log.Printf("restore staging cleanup failed for %s: %v", stage, err)
+}
+
+func logRestoreSyncFailed(dir string, err error) {
+	log.Printf("restore task tree replaced in %s but directory sync failed; recovery journal retained: %v", dir, err)
+}
+
 func logCleanupFailed(err error) { log.Printf("cleanup failed: %v", err) }
 
 func logRenderFailed(templateName string, err error) {
